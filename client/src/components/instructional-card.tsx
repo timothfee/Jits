@@ -1,27 +1,28 @@
 import { useState, useEffect } from "react";
 import { Link } from "wouter";
-import { Play, CheckCircle2, AlertTriangle } from "lucide-react";
+import { Play, CheckCircle2, AlertTriangle, Shirt } from "lucide-react";
 import type { InstructionalWithRelations } from "@shared/schema";
 import { TechniqueBadge } from "./technique-badge";
 import { formatDuration, hexToRgba } from "@/lib/format";
 import { apiUrl } from "@/lib/queryClient";
 
-export function InstructionalCard({
-  item,
-}: {
-  item: InstructionalWithRelations;
-}) {
+const RULESET_LABELS: Record<string, { label: string; cls: string }> = {
+  gi: { label: "Gi", cls: "bg-blue-500/15 text-blue-400" },
+  nogi: { label: "No-Gi", cls: "bg-amber-500/15 text-amber-400" },
+  both: { label: "Gi + No-Gi", cls: "bg-purple-500/15 text-purple-400" },
+};
+
+export function InstructionalCard({ item }: { item: InstructionalWithRelations }) {
   const [thumbFailed, setThumbFailed] = useState(false);
-  // Reset the failure flag if the item (or its thumbnail version) changes so a
-  // regenerated thumbnail is retried instead of staying on the fallback.
-  useEffect(() => {
-    setThumbFailed(false);
-  }, [item.thumbnail, item.updatedAt]);
+  useEffect(() => { setThumbFailed(false); }, [item.thumbnail, item.updatedAt]);
   const showThumb = !!item.thumbnail && !thumbFailed;
   const progressPct =
     item.duration && item.duration > 0
       ? Math.min(100, Math.round((item.progress / item.duration) * 100))
       : 0;
+
+  // Use the first technique category for the card's colour accent/gradient
+  const primaryCat = item.techniqueCategories?.[0] ?? null;
 
   return (
     <Link
@@ -29,14 +30,14 @@ export function InstructionalCard({
       className="group block rounded-lg overflow-hidden border border-card-border bg-card hover-elevate transition-shadow focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       data-testid={`card-instructional-${item.id}`}
     >
-      {/* Thumbnail / poster area */}
+      {/* Thumbnail / poster */}
       <div
         className="relative aspect-video overflow-hidden"
         style={
-          item.techniqueCategory
+          primaryCat
             ? {
                 background: `radial-gradient(120% 120% at 30% 20%, ${hexToRgba(
-                  item.techniqueCategory.color,
+                  primaryCat.color,
                   0.22
                 )}, transparent 60%), linear-gradient(160deg, hsl(var(--card)), hsl(var(--sidebar-accent)))`,
               }
@@ -63,24 +64,22 @@ export function InstructionalCard({
         </div>
         {!item.available && (
           <div className="absolute top-2 right-2 flex items-center gap-1 rounded-full bg-amber-500/90 text-amber-950 px-2 py-0.5 text-[10px] font-medium">
-            <AlertTriangle className="size-3" />
-            Missing
+            <AlertTriangle className="size-3" /> Missing
           </div>
         )}
         {item.watched && (
           <div className="absolute top-2 left-2 flex items-center gap-1 rounded-full bg-emerald-500/90 text-emerald-950 px-2 py-0.5 text-[10px] font-medium">
-            <CheckCircle2 className="size-3" />
-            Watched
+            <CheckCircle2 className="size-3" /> Watched
           </div>
         )}
         <div className="absolute bottom-2 right-2 rounded bg-black/70 text-white px-1.5 py-0.5 text-[10px] font-mono">
           {formatDuration(item.duration)}
         </div>
-        {/* category color accent bar */}
-        {item.techniqueCategory && (
+        {/* Category colour accent bar */}
+        {primaryCat && (
           <div
             className="absolute left-0 top-0 bottom-0 w-1"
-            style={{ backgroundColor: item.techniqueCategory.color }}
+            style={{ backgroundColor: primaryCat.color }}
           />
         )}
       </div>
@@ -94,28 +93,42 @@ export function InstructionalCard({
         </div>
         <div className="space-y-0.5 text-xs text-muted-foreground">
           {item.instructor ? (
-            <div className="truncate font-medium text-foreground/80">
-              {item.instructor.name}
-            </div>
+            <div className="truncate font-medium text-foreground/80">{item.instructor.name}</div>
           ) : (
             <div className="italic">No instructor</div>
           )}
           <div className="truncate">{item.position?.name || "Unspecified position"}</div>
         </div>
-        <div className="flex items-center justify-between gap-2 pt-1">
-          <TechniqueBadge category={item.techniqueCategory} size="sm" />
+
+        {/* Technique badges + ruleset chip */}
+        <div className="flex items-center flex-wrap gap-1.5 pt-1">
+          {item.techniqueCategories?.length > 0 ? (
+            item.techniqueCategories.map((cat: any) => (
+              <TechniqueBadge key={cat.id} category={cat} size="sm" />
+            ))
+          ) : (
+            <TechniqueBadge category={null} size="sm" />
+          )}
+          {item.ruleset && item.ruleset !== "unknown" && RULESET_LABELS[item.ruleset] && (
+            <span
+              className={`inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${
+                RULESET_LABELS[item.ruleset].cls
+              }`}
+            >
+              <Shirt className="size-2.5" />
+              {RULESET_LABELS[item.ruleset].label}
+            </span>
+          )}
           {item.videos.length > 1 && (
-            <span className="text-[10px] text-muted-foreground/70 font-mono">
+            <span className="text-[10px] text-muted-foreground/70 font-mono ml-auto">
               {item.videos.length} parts
             </span>
           )}
         </div>
+
         {progressPct > 0 && (
           <div className="h-1 rounded-full bg-muted overflow-hidden">
-            <div
-              className="h-full bg-primary"
-              style={{ width: `${progressPct}%` }}
-            />
+            <div className="h-full bg-primary" style={{ width: `${progressPct}%` }} />
           </div>
         )}
       </div>
@@ -147,10 +160,7 @@ export function EmptyLibrary({ onScan }: { onScan?: () => void }) {
         manually to get started.
       </p>
       {onScan && (
-        <button
-          onClick={onScan}
-          className="mt-4 text-sm text-primary hover:underline font-medium"
-        >
+        <button onClick={onScan} className="mt-4 text-sm text-primary hover:underline font-medium">
           Scan your media folder →
         </button>
       )}

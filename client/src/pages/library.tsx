@@ -15,38 +15,45 @@ import {
   Eraser,
   CircleDot,
   Search,
+  Shirt,
 } from "lucide-react";
+
+// Ruleset options shown in the filter panel
+const RULESETS = [
+  { value: "gi", label: "Gi" },
+  { value: "nogi", label: "No-Gi" },
+  { value: "both", label: "Both" },
+] as const;
 
 type Filters = {
   q?: string;
   instructorId?: number;
-  techniqueCategoryId?: number;
+  /** Comma-separated list of technique category IDs */
+  techniqueCategoryIds?: number[];
   positionId?: number;
   tagId?: number;
+  ruleset?: string;
   watched?: boolean;
   sort?: string;
 };
 
 function useFilters(): [Filters, (patch: Partial<Filters>) => void, () => void] {
   const [location] = useLocation();
-
   const rawHash = typeof window !== "undefined" ? window.location.hash.slice(1) : location;
   const hashLocation = rawHash || location || "/";
   const [basePath, search = ""] = hashLocation.split("?");
   const params = new URLSearchParams(search);
 
+  const techIds = params.get("techniqueCategoryIds");
   const filters: Filters = {
     q: params.get("q") || undefined,
-    instructorId: params.get("instructorId")
-      ? Number(params.get("instructorId"))
+    instructorId: params.get("instructorId") ? Number(params.get("instructorId")) : undefined,
+    techniqueCategoryIds: techIds
+      ? techIds.split(",").map(Number).filter((n) => !isNaN(n) && n > 0)
       : undefined,
-    techniqueCategoryId: params.get("techniqueCategoryId")
-      ? Number(params.get("techniqueCategoryId"))
-      : undefined,
-    positionId: params.get("positionId")
-      ? Number(params.get("positionId"))
-      : undefined,
+    positionId: params.get("positionId") ? Number(params.get("positionId")) : undefined,
     tagId: params.get("tagId") ? Number(params.get("tagId")) : undefined,
+    ruleset: params.get("ruleset") || undefined,
     watched: params.get("watched") === "true" ? true : undefined,
     sort: params.get("sort") || undefined,
   };
@@ -54,16 +61,18 @@ function useFilters(): [Filters, (patch: Partial<Filters>) => void, () => void] 
   const setFilters = (patch: Partial<Filters>) => {
     const p = new URLSearchParams(params);
     for (const [k, v] of Object.entries(patch)) {
-      if (v === undefined || v === "") p.delete(k);
-      else p.set(k, String(v));
+      if (v === undefined || v === "" || (Array.isArray(v) && v.length === 0)) {
+        p.delete(k);
+      } else if (Array.isArray(v)) {
+        p.set(k, v.join(","));
+      } else {
+        p.set(k, String(v));
+      }
     }
-    const nextHash = `${basePath || "/"}${p.toString() ? `?${p.toString()}` : ""}`;
-    window.location.hash = nextHash;
+    window.location.hash = `${basePath || "/"}${p.toString() ? `?${p.toString()}` : ""}`;
   };
 
-  const clear = () => {
-    window.location.hash = basePath || "/";
-  };
+  const clear = () => { window.location.hash = basePath || "/"; };
 
   return [filters, setFilters, clear];
 }
@@ -79,13 +88,15 @@ export default function Library() {
   const [filters, setFilters, clearFilters] = useFilters();
   const [panelOpen, setPanelOpen] = useState(false);
 
+  // Build API query string
   const params = new URLSearchParams();
   if (filters.q) params.set("q", filters.q);
   if (filters.instructorId) params.set("instructorId", String(filters.instructorId));
-  if (filters.techniqueCategoryId)
-    params.set("techniqueCategoryId", String(filters.techniqueCategoryId));
+  if (filters.techniqueCategoryIds?.length)
+    params.set("techniqueCategoryIds", filters.techniqueCategoryIds.join(","));
   if (filters.positionId) params.set("positionId", String(filters.positionId));
   if (filters.tagId) params.set("tagId", String(filters.tagId));
+  if (filters.ruleset) params.set("ruleset", filters.ruleset);
   if (filters.watched) params.set("watched", "true");
   if (filters.sort) params.set("sort", filters.sort);
 
@@ -102,31 +113,28 @@ export default function Library() {
 
   const categories = useQuery({
     queryKey: ["/api/categories"],
-    queryFn: async () => {
-      const res = await fetch(apiUrl("/api/categories"));
-      return res.json();
-    },
+    queryFn: async () => (await fetch(apiUrl("/api/categories"))).json(),
   });
+
+  // Positions: scoped to the FIRST selected technique if any, otherwise all
+  const firstTechId = filters.techniqueCategoryIds?.[0];
+  const positionsQs = firstTechId ? `?techniqueCategoryId=${firstTechId}` : "";
   const positions = useQuery({
-    queryKey: ["/api/positions"],
-    queryFn: async () => {
-      const res = await fetch(apiUrl("/api/positions"));
+    queryKey: ["/api/positions", positionsQs],
+    queryFn: async ({ queryKey }) => {
+      const [, qs] = queryKey as [string, string];
+      const res = await fetch(apiUrl(`/api/positions${qs}`));
       return res.json();
     },
   });
+
   const instructors = useQuery({
     queryKey: ["/api/instructors"],
-    queryFn: async () => {
-      const res = await fetch(apiUrl("/api/instructors"));
-      return res.json();
-    },
+    queryFn: async () => (await fetch(apiUrl("/api/instructors"))).json(),
   });
   const tags = useQuery({
     queryKey: ["/api/tags"],
-    queryFn: async () => {
-      const res = await fetch(apiUrl("/api/tags"));
-      return res.json();
-    },
+    queryFn: async () => (await fetch(apiUrl("/api/tags"))).json(),
   });
 
   const positionsByGroup = useMemo(() => {
@@ -139,82 +147,128 @@ export default function Library() {
     return Array.from(map.entries());
   }, [positions.data]);
 
+  // Toggle a technique category ID in the multi-select list
+  const toggleTechCategory = (id: number) => {
+    const current = filters.techniqueCategoryIds || [];
+    const next = current.includes(id) ? current.filter((x) => x !== id) : [...current, id];
+    // Clear positionId when technique selection changes (avoids stale position from a different technique)
+    setFilters({ techniqueCategoryIds: next.length ? next : undefined, positionId: undefined });
+  };
+
   const activeFilterCount =
     (filters.instructorId ? 1 : 0) +
-    (filters.techniqueCategoryId ? 1 : 0) +
+    (filters.techniqueCategoryIds?.length ? 1 : 0) +
     (filters.positionId ? 1 : 0) +
     (filters.tagId ? 1 : 0) +
+    (filters.ruleset ? 1 : 0) +
     (filters.watched ? 1 : 0);
 
   const items: any[] = list.data || [];
 
   const FilterPanel = (
     <div className="space-y-6">
+      {/* Ruleset (Gi / No-Gi) */}
       <div>
         <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2 font-mono">
-          Technique
+          Ruleset
         </h4>
         <div className="space-y-1">
-          {categories.data?.map((c: any) => (
+          {RULESETS.map((r) => (
             <button
-              key={c.id}
+              key={r.value}
               onClick={() =>
-                setFilters({
-                  techniqueCategoryId:
-                    filters.techniqueCategoryId === c.id ? undefined : c.id,
-                })
+                setFilters({ ruleset: filters.ruleset === r.value ? undefined : r.value })
               }
               className={`w-full text-left px-2 py-1.5 rounded-md text-sm flex items-center gap-2 transition-colors ${
-                filters.techniqueCategoryId === c.id
+                filters.ruleset === r.value
                   ? "bg-sidebar-accent"
                   : "hover:bg-sidebar-accent/60"
               }`}
             >
-              <span
-                className="size-2.5 rounded-full"
-                style={{ backgroundColor: c.color }}
-              />
-              <span className="flex-1 truncate">{c.name}</span>
+              <Shirt className="size-3.5 shrink-0" />
+              {r.label}
             </button>
           ))}
         </div>
       </div>
 
+      {/* Technique (multi-select) */}
       <div>
         <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2 font-mono">
-          Position
+          Technique
         </h4>
-        <div className="space-y-3">
-          {positionsByGroup.map(([group, ps]) => (
-            <div key={group}>
-              <div className="text-[10px] text-muted-foreground font-mono mb-1 px-2 uppercase tracking-wider">
-                {group}
-              </div>
-              <div className="space-y-0.5">
-                {ps.map((p: any) => (
-                  <button
-                    key={p.id}
-                    onClick={() =>
-                      setFilters({
-                        positionId:
-                          filters.positionId === p.id ? undefined : p.id,
-                      })
-                    }
-                    className={`w-full text-left px-2 py-1.5 rounded-md text-sm transition-colors ${
-                      filters.positionId === p.id
-                        ? "bg-sidebar-accent"
-                        : "hover:bg-sidebar-accent/60"
-                    }`}
-                  >
-                    {p.name}
-                  </button>
-                ))}
-              </div>
-            </div>
-          ))}
+        <div className="space-y-1">
+          {categories.data?.map((c: any) => {
+            const active = filters.techniqueCategoryIds?.includes(c.id) ?? false;
+            return (
+              <button
+                key={c.id}
+                onClick={() => toggleTechCategory(c.id)}
+                className={`w-full text-left px-2 py-1.5 rounded-md text-sm flex items-center gap-2 transition-colors ${
+                  active ? "bg-sidebar-accent" : "hover:bg-sidebar-accent/60"
+                }`}
+              >
+                <span
+                  className={`size-2.5 rounded-full border-2 transition-all ${
+                    active ? "border-transparent" : "border-transparent"
+                  }`}
+                  style={{ backgroundColor: c.color }}
+                />
+                <span className="flex-1 truncate">{c.name}</span>
+                {active && (
+                  <span className="size-2 rounded-full bg-primary shrink-0" />
+                )}
+              </button>
+            );
+          })}
         </div>
       </div>
 
+      {/* Position — scoped when a technique is selected */}
+      <div>
+        <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2 font-mono flex items-center gap-1.5">
+          Position
+          {firstTechId && (
+            <span className="text-[9px] normal-case text-muted-foreground/60 font-normal font-sans">
+              (filtered)
+            </span>
+          )}
+        </h4>
+        {positionsByGroup.length === 0 && firstTechId ? (
+          <p className="text-xs text-muted-foreground/60 px-2">
+            No positions for this technique.
+          </p>
+        ) : (
+          <div className="space-y-3">
+            {positionsByGroup.map(([group, ps]) => (
+              <div key={group}>
+                <div className="text-[10px] text-muted-foreground font-mono mb-1 px-2 uppercase tracking-wider">
+                  {group}
+                </div>
+                <div className="space-y-0.5">
+                  {ps.map((p: any) => (
+                    <button
+                      key={p.id}
+                      onClick={() =>
+                        setFilters({ positionId: filters.positionId === p.id ? undefined : p.id })
+                      }
+                      className={`w-full text-left px-2 py-1.5 rounded-md text-sm transition-colors ${
+                        filters.positionId === p.id
+                          ? "bg-sidebar-accent"
+                          : "hover:bg-sidebar-accent/60"
+                      }`}
+                    >
+                      {p.name}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Instructor */}
       <div>
         <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2 font-mono">
           Instructor
@@ -224,26 +278,20 @@ export default function Library() {
             <button
               key={i.id}
               onClick={() =>
-                setFilters({
-                  instructorId:
-                    filters.instructorId === i.id ? undefined : i.id,
-                })
+                setFilters({ instructorId: filters.instructorId === i.id ? undefined : i.id })
               }
               className={`w-full text-left px-2 py-1.5 rounded-md text-sm flex items-center gap-2 transition-colors ${
-                filters.instructorId === i.id
-                  ? "bg-sidebar-accent"
-                  : "hover:bg-sidebar-accent/60"
+                filters.instructorId === i.id ? "bg-sidebar-accent" : "hover:bg-sidebar-accent/60"
               }`}
             >
               <span className="flex-1 truncate">{i.name}</span>
-              <span className="text-[10px] text-muted-foreground font-mono">
-                {i.count}
-              </span>
+              <span className="text-[10px] text-muted-foreground font-mono">{i.count}</span>
             </button>
           ))}
         </div>
       </div>
 
+      {/* Tags */}
       {tags.data?.length > 0 && (
         <div>
           <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2 font-mono">
@@ -254,9 +302,7 @@ export default function Library() {
               <button
                 key={t.id}
                 onClick={() =>
-                  setFilters({
-                    tagId: filters.tagId === t.id ? undefined : t.id,
-                  })
+                  setFilters({ tagId: filters.tagId === t.id ? undefined : t.id })
                 }
                 className={`px-2 py-0.5 rounded-full text-xs transition-colors ${
                   filters.tagId === t.id
@@ -271,14 +317,13 @@ export default function Library() {
         </div>
       )}
 
+      {/* Status */}
       <div>
         <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2 font-mono">
           Status
         </h4>
         <button
-          onClick={() =>
-            setFilters({ watched: filters.watched ? undefined : true })
-          }
+          onClick={() => setFilters({ watched: filters.watched ? undefined : true })}
           className={`w-full text-left px-2 py-1.5 rounded-md text-sm flex items-center gap-2 transition-colors ${
             filters.watched ? "bg-sidebar-accent" : "hover:bg-sidebar-accent/60"
           }`}
@@ -292,6 +337,7 @@ export default function Library() {
 
   return (
     <div className="flex h-full">
+      {/* Desktop sidebar */}
       <div className="hidden lg:block w-64 shrink-0 border-r border-border overflow-y-auto p-4">
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-2 text-sm font-semibold">
@@ -304,12 +350,7 @@ export default function Library() {
             )}
           </div>
           {activeFilterCount > 0 && (
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={clearFilters}
-              className="h-7 px-2 text-xs"
-            >
+            <Button variant="ghost" size="sm" onClick={clearFilters} className="h-7 px-2 text-xs">
               <Eraser className="size-3" />
               Clear
             </Button>
@@ -363,26 +404,20 @@ export default function Library() {
                   className="appearance-none pl-8 pr-8 py-2 rounded-md border border-input bg-background text-sm hover:bg-accent/40 cursor-pointer"
                 >
                   {SORTS.map((s) => (
-                    <option key={s.value} value={s.value}>
-                      {s.label}
-                    </option>
+                    <option key={s.value} value={s.value}>{s.label}</option>
                   ))}
                 </select>
               </div>
             </div>
           </div>
 
+          {/* Mobile filter drawer */}
           {panelOpen && (
             <div className="lg:hidden mb-4 p-4 border border-border rounded-lg bg-card">
               <div className="flex items-center justify-between mb-3">
                 <span className="text-sm font-semibold">Filters</span>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setPanelOpen(false)}
-                >
-                  <Eraser className="size-3" />
-                  Close
+                <Button variant="ghost" size="sm" onClick={() => setPanelOpen(false)}>
+                  <Eraser className="size-3" /> Close
                 </Button>
               </div>
               <div className="relative mb-4 sm:hidden">
@@ -399,53 +434,52 @@ export default function Library() {
             </div>
           )}
 
+          {/* Active filter chips */}
           {(activeFilterCount > 0 || filters.q) && (
             <div className="flex flex-wrap gap-2 mb-4">
               {filters.q && (
                 <Chip label={`\u201c${filters.q}\u201d`} onClear={() => setFilters({ q: undefined })} />
               )}
-              {filters.techniqueCategoryId &&
-                categories.data?.find((c: any) => c.id === filters.techniqueCategoryId) ? (
+              {filters.techniqueCategoryIds?.map((id) => {
+                const cat = categories.data?.find((c: any) => c.id === id);
+                return cat ? (
+                  <Chip
+                    key={id}
+                    label={cat.name}
+                    onClear={() =>
+                      setFilters({
+                        techniqueCategoryIds: filters.techniqueCategoryIds?.filter((x) => x !== id),
+                      })
+                    }
+                  />
+                ) : null;
+              })}
+              {filters.ruleset && (
                 <Chip
-                  label={
-                    categories.data.find(
-                      (c: any) => c.id === filters.techniqueCategoryId
-                    ).name
-                  }
-                  onClear={() => setFilters({ techniqueCategoryId: undefined })}
+                  label={RULESETS.find((r) => r.value === filters.ruleset)?.label ?? filters.ruleset}
+                  onClear={() => setFilters({ ruleset: undefined })}
                 />
-              ) : null}
+              )}
               {filters.positionId &&
                 positions.data?.find((p: any) => p.id === filters.positionId) && (
                   <Chip
-                    label={
-                      positions.data.find(
-                        (p: any) => p.id === filters.positionId
-                      ).name
-                    }
+                    label={positions.data.find((p: any) => p.id === filters.positionId).name}
                     onClear={() => setFilters({ positionId: undefined })}
                   />
                 )}
               {filters.instructorId &&
                 instructors.data?.find((i: any) => i.id === filters.instructorId) && (
                   <Chip
-                    label={
-                      instructors.data.find(
-                        (i: any) => i.id === filters.instructorId
-                      ).name
-                    }
+                    label={instructors.data.find((i: any) => i.id === filters.instructorId).name}
                     onClear={() => setFilters({ instructorId: undefined })}
                   />
                 )}
-              {filters.tagId &&
-                tags.data?.find((t: any) => t.id === filters.tagId) && (
-                  <Chip
-                    label={
-                      tags.data.find((t: any) => t.id === filters.tagId).name
-                    }
-                    onClear={() => setFilters({ tagId: undefined })}
-                  />
-                )}
+              {filters.tagId && tags.data?.find((t: any) => t.id === filters.tagId) && (
+                <Chip
+                  label={tags.data.find((t: any) => t.id === filters.tagId).name}
+                  onClear={() => setFilters({ tagId: undefined })}
+                />
+              )}
               {filters.watched && (
                 <Chip label="Watched" onClear={() => setFilters({ watched: undefined })} />
               )}
@@ -454,17 +488,13 @@ export default function Library() {
 
           {list.isLoading ? (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-              {Array.from({ length: 8 }).map((_, i) => (
-                <InstructionalCardSkeleton key={i} />
-              ))}
+              {Array.from({ length: 8 }).map((_, i) => <InstructionalCardSkeleton key={i} />)}
             </div>
           ) : items.length === 0 ? (
             <EmptyLibrary />
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-              {items.map((item: any) => (
-                <InstructionalCard key={item.id} item={item} />
-              ))}
+              {items.map((item: any) => <InstructionalCard key={item.id} item={item} />)}
             </div>
           )}
         </div>
