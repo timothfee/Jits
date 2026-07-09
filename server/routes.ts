@@ -14,9 +14,7 @@ import {
 } from "@shared/schema";
 
 function resolveFilePath(filePath: string): string {
-  // Absolute http(s) URLs are passed through (redirect at stream time)
   if (/^https?:\/\//i.test(filePath)) return filePath;
-  // Treat as relative to media dir. Prevent path traversal.
   const resolved = path.resolve(MEDIA_DIR, filePath);
   const rel = path.relative(MEDIA_DIR, resolved);
   if (rel.startsWith("..") || path.isAbsolute(rel)) {
@@ -26,7 +24,6 @@ function resolveFilePath(filePath: string): string {
 }
 
 export async function registerRoutes(httpServer: Server, app: Express): Promise<Server> {
-  // Seed on boot
   try {
     storage.seedDefaults();
   } catch (err) {
@@ -40,23 +37,24 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   // ===== Instructionals =====
   app.get("/api/instructionals", (req, res) => {
-    const {
-      q,
-      instructorId,
-      techniqueCategoryId,
-      positionId,
-      tagId,
-      watched,
-      sort,
-    } = req.query;
+    const { q, instructorId, techniqueCategoryIds, positionId, tagId, watched, sort, ruleset } = req.query;
     const filter: any = {};
     if (q) filter.q = String(q);
     if (instructorId) filter.instructorId = Number(instructorId);
-    if (techniqueCategoryId) filter.techniqueCategoryId = Number(techniqueCategoryId);
+    // Accept comma-separated IDs: ?techniqueCategoryIds=1,3 or repeated: ?techniqueCategoryIds=1&techniqueCategoryIds=3
+    if (techniqueCategoryIds) {
+      const raw = Array.isArray(techniqueCategoryIds)
+        ? (techniqueCategoryIds as string[])
+        : String(techniqueCategoryIds).split(",");
+      const ids = raw.map(Number).filter((n) => !isNaN(n) && n > 0);
+      if (ids.length) filter.techniqueCategoryIds = ids;
+    }
     if (positionId) filter.positionId = Number(positionId);
     if (tagId) filter.tagId = Number(tagId);
+    if (ruleset) filter.ruleset = String(ruleset);
     if (watched !== undefined) filter.watched = watched === "true";
     if (sort) filter.sort = String(sort) as any;
+    res.setHeader("Cache-Control", "no-store");
     res.json(storage.listInstructionals(filter));
   });
 
@@ -70,12 +68,13 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     const parsed = insertInstructionalSchema.safeParse(req.body);
     if (!parsed.success)
       return res.status(400).json({ message: "Invalid", errors: parsed.error.flatten() });
-    // Optional video parts. Accept either a `videos` array or (for legacy
-    // clients) a single `filePath`.
     const videos = Array.isArray(req.body.videos) ? req.body.videos : undefined;
     const created = storage.createInstructional(parsed.data, videos);
     if (Array.isArray(req.body.tagIds)) {
       storage.setInstructionalTags(created.id, req.body.tagIds.map(Number));
+    }
+    if (Array.isArray(req.body.techniqueCategoryIds)) {
+      storage.setInstructionalTechniqueCategories(created.id, req.body.techniqueCategoryIds.map(Number));
     }
     res.json(storage.getInstructional(created.id));
   });
@@ -85,9 +84,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     const parsed = updateInstructionalSchema.safeParse(req.body);
     if (!parsed.success)
       return res.status(400).json({ message: "Invalid", errors: parsed.error.flatten() });
-    // Pass `videos` through only when explicitly provided as an array.
     const payload: any = { ...parsed.data };
     if (Array.isArray(req.body.videos)) payload.videos = req.body.videos;
+    if (Array.isArray(req.body.techniqueCategoryIds)) payload.techniqueCategoryIds = req.body.techniqueCategoryIds.map(Number);
     const updated = storage.updateInstructional(id, payload);
     if (!updated) return res.status(404).json({ message: "Not found" });
     if (Array.isArray(req.body.tagIds)) {
@@ -105,8 +104,6 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     const id = Number(req.params.id);
     const progress = Number(req.body.progress) || 0;
     const watched = Boolean(req.body.watched);
-    // progressVideoId is optional; if provided it must belong to this
-    // instructional so multi-part resume lands on a real part.
     let progressVideoId: number | null | undefined = undefined;
     if (req.body.progressVideoId !== undefined && req.body.progressVideoId !== null) {
       const vid = Number(req.body.progressVideoId);
@@ -122,8 +119,6 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.post("/api/instructionals/scan", (_req, res) => {
     try {
       const result = storage.scanLibrary();
-      // Surface skipped-folder warnings in the container logs so they can be
-      // diagnosed alongside the startup MEDIA_DIR status line.
       if (result.warnings && result.warnings.length > 0) {
         for (const w of result.warnings) console.warn(`[scan] ${w}`);
       }
@@ -134,26 +129,20 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
 
   // ===== Thumbnails =====
-  // Serve a generated thumbnail for an instructional.
   app.get("/api/thumb/:id", (req, res) => {
     const id = Number(req.params.id);
     const item = storage.getInstructional(id);
     if (!item) return res.status(404).json({ message: "Not found" });
-
-    // Remote thumbnail URL → let the browser fetch it directly.
     if (item.thumbnail && /^https?:\/\//i.test(item.thumbnail)) {
       return res.redirect(item.thumbnail);
     }
-
     const file = storage.resolveThumbnail(item.thumbnail);
     if (!file) return res.status(404).json({ message: "No thumbnail" });
-
     res.setHeader("Content-Type", "image/jpeg");
     res.setHeader("Cache-Control", "public, max-age=604800, immutable");
     fs.createReadStream(file).pipe(res);
   });
 
-  // (Re)generate a thumbnail for a single instructional.
   app.post("/api/instructionals/:id/thumbnail", async (req, res) => {
     const id = Number(req.params.id);
     if (!storage.getInstructional(id))
@@ -167,7 +156,6 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
-  // Bulk-generate thumbnails for all instructionals missing one (or all, with ?force=true).
   app.post("/api/instructionals/thumbnails", async (req, res) => {
     try {
       const force = req.query.force === "true";
@@ -178,22 +166,16 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
-  // ===== Video streaming (range support) =====
-  // Streams a single video part by its id (not the instructional id). The
-  // frontend resolves which part to play from the instructional's videos[] and
-  // points the <video> at /api/videos/:videoId/stream.
+  // ===== Video streaming =====
   app.get("/api/videos/:videoId/stream", (req, res) => {
     const videoId = Number(req.params.videoId);
     const part = storage.getVideo(videoId);
     if (!part) return res.status(404).json({ message: "Not found" });
     if (!part.available)
       return res.status(410).json({ message: "File no longer available" });
-
-    // Remote URL → redirect, browser video element follows and streams directly
     if (/^https?:\/\//i.test(part.filePath)) {
       return res.redirect(part.filePath);
     }
-
     let resolved: string;
     try {
       resolved = resolveFilePath(part.filePath);
@@ -203,11 +185,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     if (!fs.existsSync(resolved)) {
       return res.status(404).json({ message: "File missing on disk" });
     }
-
     const stat = fs.statSync(resolved);
     const fileSize = stat.size;
-    // Derive the Content-Type from the actual file extension so non-mp4
-    // containers (mkv, webm, mov, ...) aren't mislabeled.
     const contentType = videoMimeType(part.filePath);
     const range = req.headers.range;
     if (range) {
@@ -258,7 +237,13 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
 
   // ===== Positions =====
-  app.get("/api/positions", (_req, res) => res.json(storage.listPositions()));
+  // Accepts optional ?techniqueCategoryId=N for dependent dropdown in the UI.
+  app.get("/api/positions", (req, res) => {
+    const techniqueCategoryId = req.query.techniqueCategoryId
+      ? Number(req.query.techniqueCategoryId)
+      : undefined;
+    res.json(storage.listPositions(techniqueCategoryId));
+  });
 
   app.post("/api/positions", (req, res) => {
     const parsed = insertPositionSchema.safeParse(req.body);

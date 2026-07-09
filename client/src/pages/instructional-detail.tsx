@@ -39,9 +39,23 @@ import {
   Plus,
   ListVideo,
   Play,
+  Shirt,
 } from "lucide-react";
 import { formatDuration, formatBytes, formatRelative } from "@/lib/format";
 import type { InstructionalVideo } from "@shared/schema";
+
+const RULESET_OPTIONS = [
+  { value: "gi", label: "Gi" },
+  { value: "nogi", label: "No-Gi" },
+  { value: "both", label: "Both" },
+  { value: "unknown", label: "Unknown" },
+] as const;
+
+const RULESET_DISPLAY: Record<string, { label: string; cls: string }> = {
+  gi: { label: "Gi", cls: "bg-blue-500/15 text-blue-400" },
+  nogi: { label: "No-Gi", cls: "bg-amber-500/15 text-amber-400" },
+  both: { label: "Gi + No-Gi", cls: "bg-purple-500/15 text-purple-400" },
+};
 
 export default function InstructionalDetail() {
   const { id } = useParams();
@@ -55,7 +69,7 @@ export default function InstructionalDetail() {
 
   const item = useQuery({
     queryKey: ["/api/instructionals", numId],
-    queryFn: async ({ queryKey }) => {
+    queryFn: async () => {
       const res = await fetch(apiUrl(`/api/instructionals/${numId}`));
       if (!res.ok) throw new Error("failed");
       return res.json();
@@ -64,8 +78,6 @@ export default function InstructionalDetail() {
 
   const videos: InstructionalVideo[] = item.data?.videos ?? [];
 
-  // Pick the part to play: the one progress belongs to (if it still exists AND
-  // is available), otherwise the first available part, otherwise the first part.
   const initialVideoId = useMemo(() => {
     if (videos.length === 0) return null;
     const byId = new Map(videos.map((v) => [v.id, v]));
@@ -75,34 +87,21 @@ export default function InstructionalDetail() {
   }, [item.data]);
 
   useEffect(() => {
-    if (currentVideoId === null && initialVideoId !== null) {
-      setCurrentVideoId(initialVideoId);
-    }
+    if (currentVideoId === null && initialVideoId !== null) setCurrentVideoId(initialVideoId);
   }, [initialVideoId, currentVideoId]);
 
-  // When the instructional changes, reset to the resumed part.
   useEffect(() => {
     setCurrentVideoId(initialVideoId);
     setAutoAdvance(false);
   }, [item.data?.id, initialVideoId]);
 
-  const currentVideo =
-    videos.find((v) => v.id === currentVideoId) ?? videos[0] ?? null;
-
-  const currentIndex = currentVideo
-    ? videos.findIndex((v) => v.id === currentVideo.id)
-    : -1;
-  const nextVideo =
-    currentIndex >= 0 && currentIndex < videos.length - 1
-      ? videos[currentIndex + 1]
-      : null;
+  const currentVideo = videos.find((v) => v.id === currentVideoId) ?? videos[0] ?? null;
+  const currentIndex = currentVideo ? videos.findIndex((v) => v.id === currentVideo.id) : -1;
+  const nextVideo = currentIndex >= 0 && currentIndex < videos.length - 1 ? videos[currentIndex + 1] : null;
 
   const progressMutation = useMutation({
-    mutationFn: async (data: {
-      progress: number;
-      watched: boolean;
-      progressVideoId?: number | null;
-    }) => apiRequest("PATCH", `/api/instructionals/${numId}/progress`, data),
+    mutationFn: async (data: { progress: number; watched: boolean; progressVideoId?: number | null }) =>
+      apiRequest("PATCH", `/api/instructionals/${numId}/progress`, data),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["/api/instructionals", numId] });
       qc.invalidateQueries({ queryKey: ["/api/instructionals"] });
@@ -112,71 +111,43 @@ export default function InstructionalDetail() {
 
   const deleteMutation = useMutation({
     mutationFn: async () => apiRequest("DELETE", `/api/instructionals/${numId}`),
-    onSuccess: () => {
-      toast({ title: "Deleted" });
-      window.location.hash = "#/";
-    },
+    onSuccess: () => { toast({ title: "Deleted" }); window.location.hash = "#/"; },
   });
 
   const toggleWatched = () => {
-    progressMutation.mutate({
-      progress: item.data?.progress || 0,
-      watched: !item.data?.watched,
-      progressVideoId: currentVideo?.id ?? null,
-    });
+    progressMutation.mutate({ progress: item.data?.progress || 0, watched: !item.data?.watched, progressVideoId: currentVideo?.id ?? null });
   };
 
   const switchPart = (videoId: number) => {
     setCurrentVideoId(videoId);
     setAutoAdvance(false);
-    // Seek the new source to its start once it loads.
-    requestAnimationFrame(() => {
-      const v = videoRef.current;
-      if (v) v.currentTime = 0;
-    });
+    requestAnimationFrame(() => { const v = videoRef.current; if (v) v.currentTime = 0; });
   };
 
   const onTimeUpdate = () => {
     const v = videoRef.current;
     if (!v || !item.data || !currentVideo) return;
-    // throttle: only persist every ~10s
     const sec = Math.floor(v.currentTime);
     if (sec % 10 === 0 && sec > 0 && sec !== item.data.progress) {
       const watched = v.duration ? v.currentTime / v.duration > 0.9 : false;
-      progressMutation.mutate({
-        progress: sec,
-        watched,
-        progressVideoId: currentVideo.id,
-      });
+      progressMutation.mutate({ progress: sec, watched, progressVideoId: currentVideo.id });
     }
   };
 
-  // When the current part loads, resume from saved progress if this is the
-  // part the progress belongs to.
   const onLoadedMetadata = () => {
     const v = videoRef.current;
     if (!v || !item.data || !currentVideo) return;
-    if (
-      item.data.progressVideoId === currentVideo.id &&
-      item.data.progress > 5
-    ) {
+    if (item.data.progressVideoId === currentVideo.id && item.data.progress > 5) {
       v.currentTime = item.data.progress;
     }
   };
 
   const onEnded = () => {
     if (nextVideo) {
-      // Finished a non-final part: record resume state for the NEXT part so a
-      // re-open lands on it (not the just-finished one), then advance.
-      progressMutation.mutate({
-        progress: 0,
-        watched: false,
-        progressVideoId: nextVideo.id,
-      });
+      progressMutation.mutate({ progress: 0, watched: false, progressVideoId: nextVideo.id });
       setAutoAdvance(true);
       setCurrentVideoId(nextVideo.id);
     } else {
-      // Final part ended: mark the whole instructional watched.
       progressMutation.mutate({
         progress: currentVideo?.duration ?? item.data?.duration ?? 0,
         watched: true,
@@ -200,43 +171,22 @@ export default function InstructionalDetail() {
     return (
       <div className="p-6 max-w-5xl mx-auto text-center py-20">
         <p className="text-muted-foreground">Instructional not found.</p>
-        <Link href="/">
-          <Button variant="outline" className="mt-4">
-            Back to library
-          </Button>
-        </Link>
+        <Link href="/"><Button variant="outline" className="mt-4">Back to library</Button></Link>
       </div>
     );
   }
 
   const it = item.data;
-  // Aggregate progress across parts: sum durations of parts before the part
-  // that holds the saved progress, then add the saved seconds. Falls back to a
-  // simple ratio of the current part when durations are unknown.
-  const progVideoIdx = it.progressVideoId
-    ? videos.findIndex((v) => v.id === it.progressVideoId)
-    : -1;
-  const aggregateBefore =
-    progVideoIdx > 0
-      ? videos
-          .slice(0, progVideoIdx)
-          .reduce((s, v) => s + (v.duration ?? 0), 0)
-      : 0;
+  const progVideoIdx = it.progressVideoId ? videos.findIndex((v) => v.id === it.progressVideoId) : -1;
+  const aggregateBefore = progVideoIdx > 0 ? videos.slice(0, progVideoIdx).reduce((s, v) => s + (v.duration ?? 0), 0) : 0;
   const aggregateProgress = aggregateBefore + (it.progress || 0);
   const totalDuration = it.duration || videos.reduce((s, v) => s + (v.duration ?? 0), 0);
-  const progressPct =
-    totalDuration && totalDuration > 0
-      ? Math.min(100, Math.round((aggregateProgress / totalDuration) * 100))
-      : 0;
+  const progressPct = totalDuration && totalDuration > 0 ? Math.min(100, Math.round((aggregateProgress / totalDuration) * 100)) : 0;
 
   return (
     <div className="p-4 md:p-6 max-w-6xl mx-auto">
-      <Link
-        href="/"
-        className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground mb-4"
-      >
-        <ArrowLeft className="size-4" />
-        Back to library
+      <Link href="/" className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground mb-4">
+        <ArrowLeft className="size-4" /> Back to library
       </Link>
 
       {/* Player */}
@@ -266,8 +216,14 @@ export default function InstructionalDetail() {
       <div className="flex items-start justify-between gap-4 mb-4">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 mb-2 flex-wrap">
-            {it.techniqueCategory && (
-              <TechniqueBadge category={it.techniqueCategory} />
+            {it.techniqueCategories?.map((cat: any) => (
+              <TechniqueBadge key={cat.id} category={cat} />
+            ))}
+            {it.ruleset && it.ruleset !== "unknown" && RULESET_DISPLAY[it.ruleset] && (
+              <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ${RULESET_DISPLAY[it.ruleset].cls}`}>
+                <Shirt className="size-3" />
+                {RULESET_DISPLAY[it.ruleset].label}
+              </span>
             )}
             {!it.available && (
               <span className="inline-flex items-center gap-1 text-amber-500 text-xs">
@@ -276,70 +232,31 @@ export default function InstructionalDetail() {
             )}
             {videos.length > 1 && (
               <span className="inline-flex items-center gap-1 text-muted-foreground text-xs">
-                <ListVideo className="size-3" />
-                Part {currentIndex + 1} of {videos.length}
+                <ListVideo className="size-3" /> Part {currentIndex + 1} of {videos.length}
               </span>
             )}
           </div>
-          <h1 className="font-display font-bold text-xl leading-tight mb-2">
-            {it.title}
-          </h1>
+          <h1 className="font-display font-bold text-xl leading-tight mb-2">{it.title}</h1>
           <div className="flex items-center gap-3 text-sm text-muted-foreground flex-wrap">
             {it.instructor && (
-              <Link
-                href={`/instructors/${it.instructor.id}`}
-                className="inline-flex items-center gap-1.5 hover:text-foreground"
-              >
+              <Link href={`/instructors/${it.instructor.id}`} className="inline-flex items-center gap-1.5 hover:text-foreground">
                 <BeltDot belt={it.instructor.belt} />
-                <span className="font-medium text-foreground">
-                  {it.instructor.name}
-                </span>
+                <span className="font-medium text-foreground">{it.instructor.name}</span>
               </Link>
             )}
             {it.position && (
-              <>
-                <span className="text-muted-foreground/40">·</span>
-                <span>{it.position.name}</span>
-              </>
+              <><span className="text-muted-foreground/40">·</span><span>{it.position.name}</span></>
             )}
           </div>
         </div>
         <div className="flex items-center gap-2 shrink-0">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={toggleWatched}
-            disabled={progressMutation.isPending}
-          >
-            {it.watched ? (
-              <>
-                <CheckCircle2 className="size-4 text-emerald-500" />
-                Watched
-              </>
-            ) : (
-              <>
-                <Circle className="size-4" />
-                Mark watched
-              </>
-            )}
+          <Button variant="outline" size="sm" onClick={toggleWatched} disabled={progressMutation.isPending}>
+            {it.watched ? (<><CheckCircle2 className="size-4 text-emerald-500" /> Watched</>) : (<><Circle className="size-4" /> Mark watched</>)}
           </Button>
-          <Button
-            variant="outline"
-            size="icon"
-            onClick={() => setEditOpen(true)}
-            aria-label="Edit"
-          >
+          <Button variant="outline" size="icon" onClick={() => setEditOpen(true)} aria-label="Edit">
             <Pencil className="size-4" />
           </Button>
-          <Button
-            variant="outline"
-            size="icon"
-            onClick={() => {
-              if (confirm("Delete this instructional entry?")) deleteMutation.mutate();
-            }}
-            aria-label="Delete"
-            className="text-destructive hover:text-destructive"
-          >
+          <Button variant="outline" size="icon" onClick={() => { if (confirm("Delete this instructional entry?")) deleteMutation.mutate(); }} aria-label="Delete" className="text-destructive hover:text-destructive">
             <Trash2 className="size-4" />
           </Button>
         </div>
@@ -355,14 +272,9 @@ export default function InstructionalDetail() {
           <div className="flex items-center gap-2 flex-1 max-w-xs">
             <span className="text-xs text-muted-foreground">Progress</span>
             <div className="flex-1 h-1.5 rounded-full bg-muted overflow-hidden">
-              <div
-                className="h-full bg-primary"
-                style={{ width: `${progressPct}%` }}
-              />
+              <div className="h-full bg-primary" style={{ width: `${progressPct}%` }} />
             </div>
-            <span className="text-xs font-mono text-muted-foreground">
-              {progressPct}%
-            </span>
+            <span className="text-xs font-mono text-muted-foreground">{progressPct}%</span>
           </div>
         )}
       </div>
@@ -372,137 +284,67 @@ export default function InstructionalDetail() {
         <div className="md:col-span-2 space-y-4">
           {it.description && (
             <div>
-              <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2 font-mono">
-                Description
-              </h3>
-              <p className="text-sm leading-relaxed whitespace-pre-wrap">
-                {it.description}
-              </p>
+              <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2 font-mono">Description</h3>
+              <p className="text-sm leading-relaxed whitespace-pre-wrap">{it.description}</p>
             </div>
           )}
           {it.notes && (
             <div>
-              <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2 font-mono">
-                Notes
-              </h3>
-              <p className="text-sm leading-relaxed whitespace-pre-wrap rounded-md bg-card border border-card-border p-3">
-                {it.notes}
-              </p>
+              <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2 font-mono">Notes</h3>
+              <p className="text-sm leading-relaxed whitespace-pre-wrap rounded-md bg-card border border-card-border p-3">{it.notes}</p>
             </div>
           )}
-
-          {/* Parts list */}
           {videos.length > 0 && (
             <div>
-              <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2 font-mono">
-                Parts
-              </h3>
+              <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2 font-mono">Parts</h3>
               <div className="rounded-md border border-card-border overflow-hidden">
                 {videos.map((v, i) => {
                   const active = v.id === currentVideo?.id;
                   return (
-                    <button
-                      key={v.id}
-                      onClick={() => switchPart(v.id)}
-                      data-testid={`button-part-${v.id}`}
+                    <button key={v.id} onClick={() => switchPart(v.id)} data-testid={`button-part-${v.id}`}
                       className={`w-full flex items-center gap-3 px-3 py-2 text-left text-sm border-b border-card-border last:border-0 transition-colors ${
-                        active
-                          ? "bg-primary/10 text-foreground"
-                          : "hover:bg-muted/60"
+                        active ? "bg-primary/10 text-foreground" : "hover:bg-muted/60"
                       }`}
                     >
-                      <Play
-                        className={`size-4 shrink-0 ${
-                          active ? "text-primary" : "text-muted-foreground"
-                        }`}
-                        fill="currentColor"
-                      />
-                      <span className="font-mono text-xs text-muted-foreground w-6 shrink-0">
-                        {String(i + 1).padStart(2, "0")}
-                      </span>
-                      <span className="flex-1 truncate font-mono text-xs">
-                        {v.fileName}
-                      </span>
-                      {!v.available && (
-                        <span className="text-[10px] text-amber-500">missing</span>
-                      )}
-                      {v.duration ? (
-                        <span className="text-[10px] text-muted-foreground font-mono">
-                          {formatDuration(v.duration)}
-                        </span>
-                      ) : null}
+                      <Play className={`size-4 shrink-0 ${active ? "text-primary" : "text-muted-foreground"}`} fill="currentColor" />
+                      <span className="font-mono text-xs text-muted-foreground w-6 shrink-0">{String(i + 1).padStart(2, "0")}</span>
+                      <span className="flex-1 truncate font-mono text-xs">{v.fileName}</span>
+                      {!v.available && <span className="text-[10px] text-amber-500">missing</span>}
+                      {v.duration ? <span className="text-[10px] text-muted-foreground font-mono">{formatDuration(v.duration)}</span> : null}
                     </button>
                   );
                 })}
               </div>
             </div>
           )}
-
           {it.tags.length > 0 && (
             <div>
-              <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2 font-mono">
-                Tags
-              </h3>
+              <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2 font-mono">Tags</h3>
               <div className="flex flex-wrap gap-1.5">
                 {it.tags.map((t: any) => (
-                  <span
-                    key={t.id}
-                    className="inline-flex items-center gap-1 rounded-full bg-muted px-2.5 py-0.5 text-xs"
-                  >
-                    <TagIcon className="size-3 text-muted-foreground" />
-                    {t.name}
+                  <span key={t.id} className="inline-flex items-center gap-1 rounded-full bg-muted px-2.5 py-0.5 text-xs">
+                    <TagIcon className="size-3 text-muted-foreground" />{t.name}
                   </span>
                 ))}
               </div>
             </div>
           )}
         </div>
-
         <div className="space-y-2 text-sm">
           <MetaRow icon={Clock} label="Duration" value={formatDuration(it.duration)} />
-          <MetaRow
-            icon={ListVideo}
-            label="Parts"
-            value={String(videos.length)}
-          />
-          <MetaRow
-            icon={HardDrive}
-            label="Size"
-            value={formatBytes(
-              videos.reduce((s, v) => s + (v.fileSize ?? 0), 0)
-            )}
-          />
-          <MetaRow
-            icon={Calendar}
-            label="Added"
-            value={formatRelative(it.createdAt)}
-          />
-          {it.folderPath && (
-            <MetaRow icon={Folder} label="Folder" value={it.folderPath} mono />
-          )}
+          <MetaRow icon={ListVideo} label="Parts" value={String(videos.length)} />
+          <MetaRow icon={HardDrive} label="Size" value={formatBytes(videos.reduce((s, v) => s + (v.fileSize ?? 0), 0))} />
+          <MetaRow icon={Calendar} label="Added" value={formatRelative(it.createdAt)} />
+          {it.folderPath && <MetaRow icon={Folder} label="Folder" value={it.folderPath} mono />}
         </div>
       </div>
 
-      <EditDialog
-        open={editOpen}
-        onOpenChange={setEditOpen}
-        instructional={it}
-      />
+      <EditDialog open={editOpen} onOpenChange={setEditOpen} instructional={it} />
     </div>
   );
 }
 
-function MetaRow({
-  icon: Icon,
-  label,
-  value,
-  mono,
-}: {
-  icon: any;
-  label: string;
-  value: string;
-  mono?: boolean;
-}) {
+function MetaRow({ icon: Icon, label, value, mono }: { icon: any; label: string; value: string; mono?: boolean }) {
   return (
     <div className="flex items-center gap-2.5 py-1.5 border-b border-border/50">
       <Icon className="size-3.5 text-muted-foreground shrink-0" />
@@ -513,45 +355,48 @@ function MetaRow({
 }
 
 function EditDialog({
-  open,
-  onOpenChange,
-  instructional,
+  open, onOpenChange, instructional,
 }: {
-  open: boolean;
-  onOpenChange: (v: boolean) => void;
-  instructional: any;
+  open: boolean; onOpenChange: (v: boolean) => void; instructional: any;
 }) {
   const qc = useQueryClient();
   const { toast } = useToast();
+
   const [form, setForm] = useState({
     title: "",
     description: "",
     instructorId: "",
     positionId: "",
-    techniqueCategoryId: "",
+    ruleset: "unknown",
     notes: "",
     rating: 0,
   });
-  // Video parts editor state: each entry is a raw file path/URL string.
+  const [selectedTechniqueIds, setSelectedTechniqueIds] = useState<number[]>([]);
   const [parts, setParts] = useState<string[]>([]);
   const [selectedTags, setSelectedTags] = useState<number[]>([]);
   const [newTag, setNewTag] = useState("");
 
   const instructors = useQuery({
     queryKey: ["/api/instructors"],
-    queryFn: async ({ queryKey }) => (await fetch(apiUrl(queryKey.join("/")))).json(),
-  });
-  const positions = useQuery({
-    queryKey: ["/api/positions"],
-    queryFn: async ({ queryKey }) => (await fetch(apiUrl(queryKey.join("/")))).json(),
+    queryFn: async () => (await fetch(apiUrl("/api/instructors"))).json(),
   });
   const categories = useQuery({
     queryKey: ["/api/categories"],
-    queryFn: async ({ queryKey }) => (await fetch(apiUrl(queryKey.join("/")))).json(),
+    queryFn: async () => (await fetch(apiUrl("/api/categories"))).json(),
+  });
+  // Positions: scoped to the FIRST selected technique when editing, otherwise all
+  const firstTechId = selectedTechniqueIds[0];
+  const positionsQs = firstTechId ? `?techniqueCategoryId=${firstTechId}` : "";
+  const positions = useQuery({
+    queryKey: ["/api/positions", positionsQs],
+    queryFn: async ({ queryKey }) => {
+      const [, qs] = queryKey as [string, string];
+      return (await fetch(apiUrl(`/api/positions${qs}`))).json();
+    },
   });
   const tags = useQuery({
     queryKey: ["/api/tags"],
-    queryFn: async ({ queryKey }) => (await fetch(apiUrl(queryKey.join("/")))).json(),
+    queryFn: async () => (await fetch(apiUrl("/api/tags"))).json(),
   });
 
   useEffect(() => {
@@ -559,38 +404,40 @@ function EditDialog({
       setForm({
         title: instructional.title || "",
         description: instructional.description || "",
-        instructorId: instructional.instructorId
-          ? String(instructional.instructorId)
-          : "",
-        positionId: instructional.positionId
-          ? String(instructional.positionId)
-          : "",
-        techniqueCategoryId: instructional.techniqueCategoryId
-          ? String(instructional.techniqueCategoryId)
-          : "",
+        instructorId: instructional.instructorId ? String(instructional.instructorId) : "",
+        positionId: instructional.positionId ? String(instructional.positionId) : "",
+        ruleset: instructional.ruleset || "unknown",
         notes: instructional.notes || "",
         rating: instructional.rating || 0,
       });
-      setParts(
-        (instructional.videos ?? []).map((v: any) => v.filePath).filter(Boolean)
-      );
+      // Seed from M2M array; fall back to legacy single value for old rows
+      const techIds: number[] =
+        instructional.techniqueCategories?.map((c: any) => c.id) ??
+        (instructional.techniqueCategoryId ? [instructional.techniqueCategoryId] : []);
+      setSelectedTechniqueIds(techIds);
+      setParts((instructional.videos ?? []).map((v: any) => v.filePath).filter(Boolean));
       setSelectedTags(instructional.tags?.map((t: any) => t.id) || []);
       setNewTag("");
     }
   }, [open, instructional?.id]);
 
+  // When technique selection changes, clear positionId to avoid stale value
+  const toggleTechnique = (id: number) => {
+    setSelectedTechniqueIds((prev) => {
+      const next = prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id];
+      // Clear position when technique changes
+      setForm((f) => ({ ...f, positionId: "" }));
+      return next;
+    });
+  };
+
   const createTagMutation = useMutation({
-    mutationFn: async (name: string) =>
-      apiRequest("POST", "/api/tags", { name }),
-    onSuccess: async () => {
-      qc.invalidateQueries({ queryKey: ["/api/tags"] });
-    },
+    mutationFn: async (name: string) => apiRequest("POST", "/api/tags", { name }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["/api/tags"] }),
   });
 
   const saveMutation = useMutation({
     mutationFn: async () => {
-      // Normalize parts: trim, drop empties, derive a fileName from the path's
-      // basename when none is obvious.
       const cleaned = parts
         .map((p) => p.trim())
         .filter(Boolean)
@@ -603,12 +450,11 @@ function EditDialog({
         description: form.description || null,
         instructorId: form.instructorId ? Number(form.instructorId) : null,
         positionId: form.positionId ? Number(form.positionId) : null,
-        techniqueCategoryId: form.techniqueCategoryId
-          ? Number(form.techniqueCategoryId)
-          : null,
+        ruleset: form.ruleset,
         notes: form.notes || null,
         rating: form.rating,
         tagIds: selectedTags,
+        techniqueCategoryIds: selectedTechniqueIds,
         videos: cleaned,
       };
       return apiRequest("PATCH", `/api/instructionals/${instructional.id}`, payload);
@@ -633,107 +479,112 @@ function EditDialog({
         </DialogHeader>
 
         <div className="space-y-4 px-6 pb-4 overflow-y-auto flex-1">
+          {/* Title */}
           <div className="space-y-1.5">
             <Label htmlFor="f-title">Title</Label>
-            <Input
-              id="f-title"
-              value={form.title}
-              onChange={(e) => set("title", e.target.value)}
-              data-testid="input-title"
-            />
+            <Input id="f-title" value={form.title} onChange={(e) => set("title", e.target.value)} data-testid="input-title" />
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
-            <div className="space-y-1.5">
-              <Label>Instructor</Label>
-              <Select
-                value={form.instructorId}
-                onValueChange={(v) => set("instructorId", v === "none" ? "" : v)}
-              >
-                <SelectTrigger>
-                  <SelectValue placeholder="None" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="none">— None —</SelectItem>
-                  {instructors.data?.map((i: any) => (
-                    <SelectItem key={i.id} value={String(i.id)}>
-                      {i.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="space-y-1.5">
-              <Label>Technique</Label>
-              <Select
-                value={form.techniqueCategoryId}
-                onValueChange={(v) => set("techniqueCategoryId", v === "none" ? "" : v)}
-              >
-                <SelectTrigger>
-                  <SelectValue placeholder="None" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="none">— None —</SelectItem>
-                  {categories.data?.map((c: any) => (
-                    <SelectItem key={c.id} value={String(c.id)}>
-                      {c.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
-
+          {/* Instructor */}
           <div className="space-y-1.5">
-            <Label>Position</Label>
-            <Select
-              value={form.positionId}
-              onValueChange={(v) => set("positionId", v === "none" ? "" : v)}
-            >
-              <SelectTrigger>
-                <SelectValue placeholder="None" />
-              </SelectTrigger>
+            <Label>Instructor</Label>
+            <Select value={form.instructorId} onValueChange={(v) => set("instructorId", v === "none" ? "" : v)}>
+              <SelectTrigger><SelectValue placeholder="None" /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="none">— None —</SelectItem>
-                {positions.data?.map((p: any) => (
-                  <SelectItem key={p.id} value={String(p.id)}>
-                    {p.group}: {p.name}
-                  </SelectItem>
+                {instructors.data?.map((i: any) => (
+                  <SelectItem key={i.id} value={String(i.id)}>{i.name}</SelectItem>
                 ))}
               </SelectContent>
             </Select>
           </div>
 
+          {/* Technique (multi-select toggle grid) */}
+          <div className="space-y-1.5">
+            <Label>Technique <span className="text-muted-foreground text-xs font-normal">(select all that apply)</span></Label>
+            <div className="flex flex-wrap gap-1.5">
+              {categories.data?.map((c: any) => {
+                const active = selectedTechniqueIds.includes(c.id);
+                return (
+                  <button
+                    key={c.id}
+                    type="button"
+                    onClick={() => toggleTechnique(c.id)}
+                    className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border transition-all ${
+                      active
+                        ? "border-transparent text-white"
+                        : "border-border bg-muted hover:bg-muted/70 text-muted-foreground"
+                    }`}
+                    style={active ? { backgroundColor: c.color } : {}}
+                  >
+                    <span className="size-2 rounded-full" style={{ backgroundColor: active ? "rgba(255,255,255,0.5)" : c.color }} />
+                    {c.name}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Ruleset */}
+          <div className="space-y-1.5">
+            <Label>Ruleset</Label>
+            <div className="flex gap-2 flex-wrap">
+              {RULESET_OPTIONS.map((r) => (
+                <button
+                  key={r.value}
+                  type="button"
+                  onClick={() => set("ruleset", r.value)}
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium border transition-all ${
+                    form.ruleset === r.value
+                      ? "bg-primary text-primary-foreground border-primary"
+                      : "border-border bg-muted hover:bg-muted/70 text-muted-foreground"
+                  }`}
+                >
+                  <Shirt className="size-3" />
+                  {r.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Position — scoped to selected technique */}
+          <div className="space-y-1.5">
+            <Label>
+              Position
+              {firstTechId && (
+                <span className="ml-1 text-muted-foreground text-xs font-normal">(filtered by technique)</span>
+              )}
+            </Label>
+            <Select value={form.positionId} onValueChange={(v) => set("positionId", v === "none" ? "" : v)}>
+              <SelectTrigger><SelectValue placeholder="None" /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="none">— None —</SelectItem>
+                {positions.data?.map((p: any) => (
+                  <SelectItem key={p.id} value={String(p.id)}>{p.group}: {p.name}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          {/* Description */}
           <div className="space-y-1.5">
             <Label htmlFor="f-desc">Description</Label>
-            <Textarea
-              id="f-desc"
-              rows={3}
-              value={form.description}
-              onChange={(e) => set("description", e.target.value)}
-            />
+            <Textarea id="f-desc" rows={3} value={form.description} onChange={(e) => set("description", e.target.value)} />
           </div>
 
+          {/* Notes */}
           <div className="space-y-1.5">
             <Label htmlFor="f-notes">Notes</Label>
-            <Textarea
-              id="f-notes"
-              rows={3}
-              value={form.notes}
-              onChange={(e) => set("notes", e.target.value)}
-            />
+            <Textarea id="f-notes" rows={3} value={form.notes} onChange={(e) => set("notes", e.target.value)} />
           </div>
 
+          {/* Rating */}
           <div className="space-y-1.5">
             <Label>Rating</Label>
-            <RatingStars
-              value={form.rating}
-              onChange={(v) => set("rating", v)}
-              size={20}
-            />
+            <RatingStars value={form.rating} onChange={(v) => set("rating", v)} size={20} />
           </div>
 
-          {/* Video parts editor */}
+          {/* Video parts */}
           <div className="space-y-1.5">
             <Label>Video parts (file path or URL)</Label>
             <div className="space-y-2">
@@ -741,36 +592,18 @@ function EditDialog({
                 <div key={i} className="flex gap-2">
                   <Input
                     value={p}
-                    onChange={(e) =>
-                      setParts((arr) =>
-                        arr.map((x, j) => (j === i ? e.target.value : x))
-                      )
-                    }
+                    onChange={(e) => setParts((arr) => arr.map((x, j) => (j === i ? e.target.value : x)))}
                     className="font-mono text-xs"
                     placeholder="Instructor/Title/part1.mkv or https://…"
                     data-testid={`input-part-${i}`}
                   />
-                  <Button
-                    variant="outline"
-                    size="icon"
-                    onClick={() =>
-                      setParts((arr) => arr.filter((_, j) => j !== i))
-                    }
-                    aria-label="Remove part"
-                    data-testid={`button-remove-part-${i}`}
-                  >
+                  <Button variant="outline" size="icon" onClick={() => setParts((arr) => arr.filter((_, j) => j !== i))} aria-label="Remove part" data-testid={`button-remove-part-${i}`}>
                     <X className="size-4" />
                   </Button>
                 </div>
               ))}
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setParts((arr) => [...arr, ""])}
-                data-testid="button-add-part"
-              >
-                <Plus className="size-4" />
-                Add part
+              <Button variant="outline" size="sm" onClick={() => setParts((arr) => [...arr, ""])} data-testid="button-add-part">
+                <Plus className="size-4" /> Add part
               </Button>
             </div>
           </div>
@@ -782,16 +615,9 @@ function EditDialog({
               {tags.data
                 ?.filter((t: any) => selectedTags.includes(t.id))
                 .map((t: any) => (
-                  <span
-                    key={t.id}
-                    className="inline-flex items-center gap-1 rounded-full bg-primary/10 text-primary px-2 py-0.5 text-xs"
-                  >
+                  <span key={t.id} className="inline-flex items-center gap-1 rounded-full bg-primary/10 text-primary px-2 py-0.5 text-xs">
                     {t.name}
-                    <button
-                      onClick={() =>
-                        setSelectedTags((s) => s.filter((id) => id !== t.id))
-                      }
-                    >
+                    <button onClick={() => setSelectedTags((s) => s.filter((id) => id !== t.id))}>
                       <X className="size-3" />
                     </button>
                   </span>
@@ -803,53 +629,34 @@ function EditDialog({
                 onChange={(e) => setNewTag(e.target.value)}
                 placeholder="Add a tag…"
                 onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    const name = newTag.trim();
-                    if (!name) return;
-                    const existing = tags.data?.find(
-                      (t: any) => t.name.toLowerCase() === name.toLowerCase()
-                    );
-                    if (existing) {
-                      setSelectedTags((s) =>
-                        s.includes(existing.id) ? s : [...s, existing.id]
-                      );
-                    } else {
-                      createTagMutation.mutate(name, {
-                        onSuccess: async (res) => {
-                          const created = await res.json();
-                          setSelectedTags((s) => [...s, created.id]);
-                        },
-                      });
-                    }
-                    setNewTag("");
-                  }
-                }}
-              />
-              <Button
-                variant="outline"
-                size="icon"
-                onClick={() => {
+                  if (e.key !== "Enter") return;
+                  e.preventDefault();
                   const name = newTag.trim();
                   if (!name) return;
-                  const existing = tags.data?.find(
-                    (t: any) => t.name.toLowerCase() === name.toLowerCase()
-                  );
+                  const existing = tags.data?.find((t: any) => t.name.toLowerCase() === name.toLowerCase());
                   if (existing) {
-                    setSelectedTags((s) =>
-                      s.includes(existing.id) ? s : [...s, existing.id]
-                    );
+                    setSelectedTags((s) => s.includes(existing.id) ? s : [...s, existing.id]);
                   } else {
                     createTagMutation.mutate(name, {
-                      onSuccess: async (res) => {
-                        const created = await res.json();
-                        setSelectedTags((s) => [...s, created.id]);
-                      },
+                      onSuccess: async (res) => { const created = await res.json(); setSelectedTags((s) => [...s, created.id]); },
                     });
                   }
                   setNewTag("");
                 }}
-              >
+              />
+              <Button variant="outline" size="icon" onClick={() => {
+                const name = newTag.trim();
+                if (!name) return;
+                const existing = tags.data?.find((t: any) => t.name.toLowerCase() === name.toLowerCase());
+                if (existing) {
+                  setSelectedTags((s) => s.includes(existing.id) ? s : [...s, existing.id]);
+                } else {
+                  createTagMutation.mutate(name, {
+                    onSuccess: async (res) => { const created = await res.json(); setSelectedTags((s) => [...s, created.id]); },
+                  });
+                }
+                setNewTag("");
+              }}>
                 <Plus className="size-4" />
               </Button>
             </div>
@@ -857,12 +664,9 @@ function EditDialog({
         </div>
 
         <DialogFooter className="p-6 pt-4 border-t border-border shrink-0">
-          <Button variant="outline" onClick={() => onOpenChange(false)}>
-            Cancel
-          </Button>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
           <Button onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending}>
-            <Save className="size-4" />
-            Save
+            <Save className="size-4" /> Save
           </Button>
         </DialogFooter>
       </DialogContent>
