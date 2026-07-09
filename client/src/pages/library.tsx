@@ -86,7 +86,7 @@ const SORTS = [
 // Collapsible filter section
 function FilterSection({
   title,
-  defaultOpen = true,
+  defaultOpen = false,
   children,
   badge,
 }: {
@@ -199,8 +199,8 @@ export default function Library() {
 
   const FilterPanel = (
     <div className="space-y-5">
-      {/* Ruleset */}
-      <FilterSection title="Ruleset" badge={filters.ruleset ? 1 : 0}>
+      {/* Ruleset — closed by default */}
+      <FilterSection title="Ruleset" defaultOpen={false} badge={filters.ruleset ? 1 : 0}>
         <div className="space-y-1">
           {RULESETS.map((r) => (
             <button
@@ -221,8 +221,8 @@ export default function Library() {
         </div>
       </FilterSection>
 
-      {/* Technique */}
-      <FilterSection title="Technique" badge={filters.techniqueCategoryIds?.length}>
+      {/* Technique — open by default */}
+      <FilterSection title="Technique" defaultOpen={true} badge={filters.techniqueCategoryIds?.length}>
         <div className="space-y-1">
           {categories.data?.map((c: any) => {
             const active = filters.techniqueCategoryIds?.includes(c.id) ?? false;
@@ -243,11 +243,8 @@ export default function Library() {
         </div>
       </FilterSection>
 
-      {/* Position */}
-      <FilterSection
-        title="Position"
-        badge={filters.positionId ? 1 : 0}
-      >
+      {/* Position — closed by default */}
+      <FilterSection title="Position" defaultOpen={false} badge={filters.positionId ? 1 : 0}>
         {positionsByGroup.length === 0 && firstTechId ? (
           <p className="text-xs text-muted-foreground/60 px-2">No positions for this technique.</p>
         ) : (
@@ -283,8 +280,8 @@ export default function Library() {
         )}
       </FilterSection>
 
-      {/* Instructor */}
-      <FilterSection title="Instructor" badge={filters.instructorId ? 1 : 0}>
+      {/* Instructor — closed by default */}
+      <FilterSection title="Instructor" defaultOpen={false} badge={filters.instructorId ? 1 : 0}>
         <div className="space-y-0.5">
           {instructors.data?.map((i: any) => (
             <button
@@ -303,9 +300,9 @@ export default function Library() {
         </div>
       </FilterSection>
 
-      {/* Tags */}
+      {/* Tags — closed by default */}
       {tags.data?.length > 0 && (
-        <FilterSection title="Tags" badge={filters.tagId ? 1 : 0}>
+        <FilterSection title="Tags" defaultOpen={false} badge={filters.tagId ? 1 : 0}>
           <div className="flex flex-wrap gap-1.5">
             {tags.data.map((t: any) => (
               <button
@@ -326,8 +323,8 @@ export default function Library() {
         </FilterSection>
       )}
 
-      {/* Status */}
-      <FilterSection title="Status" badge={filters.watched ? 1 : 0}>
+      {/* Status — closed by default */}
+      <FilterSection title="Status" defaultOpen={false} badge={filters.watched ? 1 : 0}>
         <button
           onClick={() => setFilters({ watched: filters.watched ? undefined : true })}
           className={`w-full text-left px-2 py-1.5 rounded-md text-sm flex items-center gap-2 transition-colors ${
