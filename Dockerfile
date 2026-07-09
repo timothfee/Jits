@@ -26,12 +26,13 @@ ENV NODE_ENV=production \
     THUMBNAIL_DIR=/data/thumbnails
 
 # ffmpeg (thumbnail generation), tini (PID 1 signal handling / graceful
-# shutdown), ca-certificates (HTTPS for optional remote-thumbnail fetch).
+# shutdown), ca-certificates (HTTPS for optional remote-thumbnail fetch),
+# su-exec (lightweight privilege drop in entrypoint).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ffmpeg tini ca-certificates \
+    ffmpeg tini ca-certificates su-exec \
     && rm -rf /var/lib/apt/lists/*
 
-# Non-root user (the app never needs root).
+# Non-root user (entrypoint drops to this after fixing volume ownership).
 RUN groupadd --system --gid 1001 app \
     && useradd --system --uid 1001 --gid app --home-dir /app --shell /usr/sbin/nologin app \
     && mkdir -p /data /media \
@@ -41,9 +42,11 @@ COPY --from=builder --chown=app:app /app/package.json /app/package-lock.json ./
 COPY --from=builder --chown=app:app /app/node_modules ./node_modules
 COPY --from=builder --chown=app:app /app/dist ./dist
 
-USER app
+# Entrypoint script (runs as root, fixes /data /media perms, drops to app).
+COPY --chown=root:root entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 
-# /media is bind-mounted read-only at runtime; /data holds the DB + thumbnails.
+# /media is bind-mounted at runtime; /data holds the DB + thumbnails.
 VOLUME ["/media", "/data"]
 
 EXPOSE 5000
@@ -51,5 +54,6 @@ EXPOSE 5000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD node -e "fetch('http://localhost:5000/api/stats').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
-ENTRYPOINT ["/usr/bin/tini", "--"]
+# tini as PID 1, then our entrypoint drops privileges before starting node.
+ENTRYPOINT ["/usr/bin/tini", "--", "/entrypoint.sh"]
 CMD ["node", "dist/index.cjs"]
