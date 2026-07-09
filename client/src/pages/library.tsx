@@ -10,15 +10,15 @@ import {
 import { Button } from "@/components/ui/button";
 import {
   Filter,
-  LayoutGrid,
   ArrowDownWideNarrow,
   Eraser,
   CircleDot,
   Search,
   Shirt,
+  ChevronDown,
+  ChevronUp,
 } from "lucide-react";
 
-// Ruleset options shown in the filter panel
 const RULESETS = [
   { value: "gi", label: "Gi" },
   { value: "nogi", label: "No-Gi" },
@@ -28,7 +28,6 @@ const RULESETS = [
 type Filters = {
   q?: string;
   instructorId?: number;
-  /** Comma-separated list of technique category IDs */
   techniqueCategoryIds?: number[];
   positionId?: number;
   tagId?: number;
@@ -79,16 +78,53 @@ function useFilters(): [Filters, (patch: Partial<Filters>) => void, () => void] 
 
 const SORTS = [
   { value: "recent", label: "Recently added" },
-  { value: "title", label: "Title A\u2013Z" },
+  { value: "title", label: "Title A–Z" },
   { value: "rating", label: "Highest rated" },
   { value: "progress", label: "In progress" },
 ];
+
+// Collapsible filter section
+function FilterSection({
+  title,
+  defaultOpen = true,
+  children,
+  badge,
+}: {
+  title: string;
+  defaultOpen?: boolean;
+  children: React.ReactNode;
+  badge?: number;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div>
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="w-full flex items-center justify-between mb-2 group"
+      >
+        <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground font-mono flex items-center gap-1.5">
+          {title}
+          {badge ? (
+            <span className="rounded-full bg-primary text-primary-foreground text-[9px] px-1.5 py-0.5 font-sans normal-case tracking-normal">
+              {badge}
+            </span>
+          ) : null}
+        </span>
+        {open ? (
+          <ChevronUp className="size-3.5 text-muted-foreground/60 group-hover:text-muted-foreground transition-colors" />
+        ) : (
+          <ChevronDown className="size-3.5 text-muted-foreground/60 group-hover:text-muted-foreground transition-colors" />
+        )}
+      </button>
+      {open && <div>{children}</div>}
+    </div>
+  );
+}
 
 export default function Library() {
   const [filters, setFilters, clearFilters] = useFilters();
   const [panelOpen, setPanelOpen] = useState(false);
 
-  // Build API query string
   const params = new URLSearchParams();
   if (filters.q) params.set("q", filters.q);
   if (filters.instructorId) params.set("instructorId", String(filters.instructorId));
@@ -116,15 +152,13 @@ export default function Library() {
     queryFn: async () => (await fetch(apiUrl("/api/categories"))).json(),
   });
 
-  // Positions: scoped to the FIRST selected technique if any, otherwise all
   const firstTechId = filters.techniqueCategoryIds?.[0];
   const positionsQs = firstTechId ? `?techniqueCategoryId=${firstTechId}` : "";
   const positions = useQuery({
     queryKey: ["/api/positions", positionsQs],
     queryFn: async ({ queryKey }) => {
       const [, qs] = queryKey as [string, string];
-      const res = await fetch(apiUrl(`/api/positions${qs}`));
-      return res.json();
+      return (await fetch(apiUrl(`/api/positions${qs}`))).json();
     },
   });
 
@@ -147,11 +181,9 @@ export default function Library() {
     return Array.from(map.entries());
   }, [positions.data]);
 
-  // Toggle a technique category ID in the multi-select list
   const toggleTechCategory = (id: number) => {
     const current = filters.techniqueCategoryIds || [];
     const next = current.includes(id) ? current.filter((x) => x !== id) : [...current, id];
-    // Clear positionId when technique selection changes (avoids stale position from a different technique)
     setFilters({ techniqueCategoryIds: next.length ? next : undefined, positionId: undefined });
   };
 
@@ -166,12 +198,9 @@ export default function Library() {
   const items: any[] = list.data || [];
 
   const FilterPanel = (
-    <div className="space-y-6">
-      {/* Ruleset (Gi / No-Gi) */}
-      <div>
-        <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2 font-mono">
-          Ruleset
-        </h4>
+    <div className="space-y-5">
+      {/* Ruleset */}
+      <FilterSection title="Ruleset" badge={filters.ruleset ? 1 : 0}>
         <div className="space-y-1">
           {RULESETS.map((r) => (
             <button
@@ -190,13 +219,10 @@ export default function Library() {
             </button>
           ))}
         </div>
-      </div>
+      </FilterSection>
 
-      {/* Technique (multi-select) */}
-      <div>
-        <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2 font-mono">
-          Technique
-        </h4>
+      {/* Technique */}
+      <FilterSection title="Technique" badge={filters.techniqueCategoryIds?.length}>
         <div className="space-y-1">
           {categories.data?.map((c: any) => {
             const active = filters.techniqueCategoryIds?.includes(c.id) ?? false;
@@ -208,42 +234,31 @@ export default function Library() {
                   active ? "bg-sidebar-accent" : "hover:bg-sidebar-accent/60"
                 }`}
               >
-                <span
-                  className={`size-2.5 rounded-full border-2 transition-all ${
-                    active ? "border-transparent" : "border-transparent"
-                  }`}
-                  style={{ backgroundColor: c.color }}
-                />
+                <span className="size-2.5 rounded-full shrink-0" style={{ backgroundColor: c.color }} />
                 <span className="flex-1 truncate">{c.name}</span>
-                {active && (
-                  <span className="size-2 rounded-full bg-primary shrink-0" />
-                )}
+                {active && <span className="size-2 rounded-full bg-primary shrink-0" />}
               </button>
             );
           })}
         </div>
-      </div>
+      </FilterSection>
 
-      {/* Position — scoped when a technique is selected */}
-      <div>
-        <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2 font-mono flex items-center gap-1.5">
-          Position
-          {firstTechId && (
-            <span className="text-[9px] normal-case text-muted-foreground/60 font-normal font-sans">
-              (filtered)
-            </span>
-          )}
-        </h4>
+      {/* Position */}
+      <FilterSection
+        title="Position"
+        badge={filters.positionId ? 1 : 0}
+      >
         {positionsByGroup.length === 0 && firstTechId ? (
-          <p className="text-xs text-muted-foreground/60 px-2">
-            No positions for this technique.
-          </p>
+          <p className="text-xs text-muted-foreground/60 px-2">No positions for this technique.</p>
         ) : (
           <div className="space-y-3">
             {positionsByGroup.map(([group, ps]) => (
               <div key={group}>
                 <div className="text-[10px] text-muted-foreground font-mono mb-1 px-2 uppercase tracking-wider">
                   {group}
+                  {firstTechId && (
+                    <span className="ml-1 text-muted-foreground/50 normal-case">(filtered)</span>
+                  )}
                 </div>
                 <div className="space-y-0.5">
                   {ps.map((p: any) => (
@@ -266,13 +281,10 @@ export default function Library() {
             ))}
           </div>
         )}
-      </div>
+      </FilterSection>
 
       {/* Instructor */}
-      <div>
-        <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2 font-mono">
-          Instructor
-        </h4>
+      <FilterSection title="Instructor" badge={filters.instructorId ? 1 : 0}>
         <div className="space-y-0.5">
           {instructors.data?.map((i: any) => (
             <button
@@ -289,14 +301,11 @@ export default function Library() {
             </button>
           ))}
         </div>
-      </div>
+      </FilterSection>
 
       {/* Tags */}
       {tags.data?.length > 0 && (
-        <div>
-          <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2 font-mono">
-            Tags
-          </h4>
+        <FilterSection title="Tags" badge={filters.tagId ? 1 : 0}>
           <div className="flex flex-wrap gap-1.5">
             {tags.data.map((t: any) => (
               <button
@@ -314,14 +323,11 @@ export default function Library() {
               </button>
             ))}
           </div>
-        </div>
+        </FilterSection>
       )}
 
       {/* Status */}
-      <div>
-        <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2 font-mono">
-          Status
-        </h4>
+      <FilterSection title="Status" badge={filters.watched ? 1 : 0}>
         <button
           onClick={() => setFilters({ watched: filters.watched ? undefined : true })}
           className={`w-full text-left px-2 py-1.5 rounded-md text-sm flex items-center gap-2 transition-colors ${
@@ -331,13 +337,13 @@ export default function Library() {
           <CircleDot className="size-3.5" />
           Watched only
         </button>
-      </div>
+      </FilterSection>
     </div>
   );
 
   return (
     <div className="flex h-full">
-      {/* Desktop sidebar */}
+      {/* Desktop filter sidebar */}
       <div className="hidden lg:block w-64 shrink-0 border-r border-border overflow-y-auto p-4">
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-2 text-sm font-semibold">
@@ -366,9 +372,9 @@ export default function Library() {
               <h1 className="font-display font-bold text-xl">Library</h1>
               <p className="text-sm text-muted-foreground">
                 {list.isLoading
-                  ? "Loading\u2026"
+                  ? "Loading…"
                   : `${items.length} instructional${items.length === 1 ? "" : "s"}`}
-                {filters.q && ` for \u201c${filters.q}\u201d`}
+                {filters.q && ` for "${filters.q}"`}
               </p>
             </div>
             <div className="flex items-center gap-2">
@@ -390,7 +396,7 @@ export default function Library() {
                 <Search className="size-4 absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
                 <input
                   type="search"
-                  placeholder="Search\u2026"
+                  placeholder="Search…"
                   value={filters.q || ""}
                   onChange={(e) => setFilters({ q: e.target.value || undefined })}
                   className="pl-8 pr-3 py-2 rounded-md border border-input bg-background text-sm w-48 focus:outline-none focus:ring-2 focus:ring-ring"
@@ -424,7 +430,7 @@ export default function Library() {
                 <Search className="size-4 absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
                 <input
                   type="search"
-                  placeholder="Search\u2026"
+                  placeholder="Search…"
                   value={filters.q || ""}
                   onChange={(e) => setFilters({ q: e.target.value || undefined })}
                   className="pl-8 pr-3 py-2 rounded-md border border-input bg-background text-sm w-full focus:outline-none focus:ring-2 focus:ring-ring"
@@ -438,7 +444,7 @@ export default function Library() {
           {(activeFilterCount > 0 || filters.q) && (
             <div className="flex flex-wrap gap-2 mb-4">
               {filters.q && (
-                <Chip label={`\u201c${filters.q}\u201d`} onClear={() => setFilters({ q: undefined })} />
+                <Chip label={`"${filters.q}"`} onClear={() => setFilters({ q: undefined })} />
               )}
               {filters.techniqueCategoryIds?.map((id) => {
                 const cat = categories.data?.find((c: any) => c.id === id);
