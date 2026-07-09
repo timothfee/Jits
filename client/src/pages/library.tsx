@@ -15,6 +15,7 @@ import {
   ArrowDownWideNarrow,
   Eraser,
   CircleDot,
+  Search,
 } from "lucide-react";
 import { useState } from "react";
 
@@ -334,6 +335,17 @@ export default function Library() {
                   </span>
                 )}
               </Button>
+              {/* Search input (desktop) */}
+              <div className="relative hidden sm:block">
+                <Search className="size-4 absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
+                <input
+                  type="search"
+                  placeholder="Search…"
+                  value={filters.q || ""}
+                  onChange={(e) => setFilters({ q: e.target.value || undefined })}
+                  className="pl-8 pr-3 py-2 rounded-md border border-input bg-background text-sm w-48 focus:outline-none focus:ring-2 focus:ring-ring"
+                />
+              </div>
               <div className="relative">
                 <ArrowDownWideNarrow className="size-4 absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
                 <select
@@ -365,13 +377,27 @@ export default function Library() {
                   Close
                 </Button>
               </div>
+              {/* Search input (mobile) */}
+              <div className="relative mb-4 sm:hidden">
+                <Search className="size-4 absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
+                <input
+                  type="search"
+                  placeholder="Search…"
+                  value={filters.q || ""}
+                  onChange={(e) => setFilters({ q: e.target.value || undefined })}
+                  className="pl-8 pr-3 py-2 rounded-md border border-input bg-background text-sm w-full focus:outline-none focus:ring-2 focus:ring-ring"
+                />
+              </div>
               {FilterPanel}
             </div>
           )}
 
           {/* Active filter chips */}
-          {activeFilterCount > 0 && (
+          {(activeFilterCount > 0 || filters.q) && (
             <div className="flex flex-wrap gap-2 mb-4">
+              {filters.q && (
+                <Chip label={`“${filters.q}”`} onClear={() => setFilters({ q: undefined })} />
+              )}
               {filters.techniqueCategoryId &&
                 categories.data
                   ?.find((c: any) => c.id === filters.techniqueCategoryId)
