@@ -43,10 +43,18 @@ export default function Settings() {
     onSuccess: async (res) => {
       const data = await res.json();
       setScanResult(data);
-      toast({
-        title: "Scan complete",
-        description: `Added ${data.added} • Updated ${data.updated} • Instructors inferred ${data.inferred ?? 0} • Missing ${data.missing}`,
-      });
+      if (data?.error) {
+        toast({
+          title: "Scan found nothing",
+          description: data.error,
+          variant: "destructive",
+        });
+      } else {
+        toast({
+          title: "Scan complete",
+          description: `Added ${data.added} • Updated ${data.updated} • Instructors inferred ${data.inferred ?? 0} • Missing ${data.missing}`,
+        });
+      }
       qc.invalidateQueries({ queryKey: ["/api/instructionals"] });
       qc.invalidateQueries({ queryKey: ["/api/stats"] });
     },
@@ -155,11 +163,20 @@ export default function Settings() {
               <ScanLine className="size-4" />
               {scanMutation.isPending ? "Scanning…" : "Scan now"}
             </Button>
-            {scanResult && (
+            {scanResult?.error ? (
+              <span className="text-xs text-destructive font-mono">
+                {scanResult.error}
+              </span>
+            ) : scanResult ? (
               <span className="text-xs text-muted-foreground font-mono">
                 scanned {scanResult.scanned} · added {scanResult.added} ·
                 updated {scanResult.updated} · inferred {scanResult.inferred ?? 0} ·
                 missing {scanResult.missing}
+              </span>
+            ) : null}
+            {scanResult?.warnings && scanResult.warnings.length > 0 && (
+              <span className="text-xs text-amber-500 dark:text-amber-400 font-mono">
+                {scanResult.warnings.length} folder(s) skipped — see container logs
               </span>
             )}
           </div>

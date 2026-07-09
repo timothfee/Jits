@@ -13,10 +13,15 @@ services:
       - "5000:5000"
     volumes:
       # Your instructional videos (read-only — the app never writes here).
-      # Change the left side to your host folder, e.g. /home/you/Videos/BJJ:/media:ro
+      # Change the left side to your host folder, e.g. /volume1/Media/Instructionals:/media:ro
       - /path/to/your/instructionals:/media:ro
       # Persistent DB + generated thumbnails (survives rebuilds).
       - jits-data:/data
+    # The container runs as non-root uid/gid 1001 by default. If your NAS media
+    # folder isn't readable by that user (Scan finds nothing), either grant
+    # read+execute to uid 1001 on the host, or uncomment and set a user that can
+    # read it (e.g. your NAS user's uid:gid, or "0:0" for a root test).
+    # user: "0:0"
     environment:
       # Where the app looks for video files
       - MEDIA_DIR=/media

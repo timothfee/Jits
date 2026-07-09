@@ -322,6 +322,33 @@ initDb();
 migrate();
 normalizeLibrary();
 
+// Startup diagnostics for the media directory: log the resolved path, whether
+// it exists and is readable, and the uid/gid the container is running as. This
+// makes bind-mount / permission problems (very common on NAS setups) visible
+// in the container logs immediately, instead of as a silent empty scan.
+(() => {
+  const dir = MEDIA_DIR;
+  const uid = typeof process.getuid === "function" ? process.getuid() : "?";
+  const gid = typeof process.getgid === "function" ? process.getgid() : "?";
+  const exists = fs.existsSync(dir);
+  let readable = false;
+  if (exists) {
+    try {
+      fs.accessSync(dir, fs.constants.R_OK | fs.constants.X_OK);
+      readable = true;
+    } catch {
+      readable = false;
+    }
+  }
+  const status = !exists ? "MISSING" : readable ? "readable" : "NOT READABLE (permission denied)";
+  console.log(`[storage] MEDIA_DIR=${dir} | uid=${uid} gid=${gid} | ${status}`);
+  if (!exists) {
+    console.log(`[storage] Bind-mount your instructionals folder to /media, e.g. /volume1/Media/Instructionals:/media`);
+  } else if (!readable) {
+    console.log(`[storage] Grant read+execute on the host folder to uid ${uid}/gid ${gid}, or run the container as a user that can read it.`);
+  }
+})();
+
 // ---------- Helpers ----------
 function now() {
   return Date.now();
@@ -801,16 +828,47 @@ export const storage = {
     updated: number;
     missing: number;
     inferred: number;
+    error?: string;
+    warnings?: string[];
+    mediaDir?: string;
   } {
     const root = MEDIA_DIR;
     const found: { rel: string; name: string; size: number }[] = [];
+    const warnings: string[] = [];
+
+    // Preflight: a missing or unreadable MEDIA_DIR is the most common reason a
+    // scan finds nothing (wrong volume mapping, or the non-root container user
+    // can't read the bind-mounted folder). Surface it explicitly instead of
+    // silently returning 0.
+    if (!fs.existsSync(root)) {
+      return {
+        scanned: 0, added: 0, updated: 0, missing: 0, inferred: 0,
+        mediaDir: root,
+        error: `Media directory not found: ${root}. In Docker, bind-mount your instructionals folder to /media (e.g. /volume1/Media/Instructionals:/media). Check the container's volume mapping.`,
+      };
+    }
+    try {
+      fs.accessSync(root, fs.constants.R_OK | fs.constants.X_OK);
+    } catch {
+      const uid = typeof process.getuid === "function" ? process.getuid() : "?";
+      const gid = typeof process.getgid === "function" ? process.getgid() : "?";
+      return {
+        scanned: 0, added: 0, updated: 0, missing: 0, inferred: 0,
+        mediaDir: root,
+        error: `Permission denied reading ${root}. The container is running as uid ${uid} / gid ${gid}, which cannot read this folder. Either grant read+execute permission on the host folder to that uid/gid, or run the container as a user that can read it (e.g. add user: "0:0" to docker-compose for a root test).`,
+      };
+    }
 
     if (fs.existsSync(root)) {
       const walk = (dir: string) => {
         let entries: fs.Dirent[] = [];
         try {
           entries = fs.readdirSync(dir, { withFileTypes: true });
-        } catch {
+        } catch (err: any) {
+          // Don't silently swallow — record unreadable subdirectories so the
+          // user knows part of their library was skipped. Only the root is a
+          // hard failure (handled by the preflight above).
+          warnings.push(`Could not read ${path.relative(root, dir) || "."}: ${err?.code || err?.message || "error"}`);
           return;
         }
         for (const entry of entries) {
@@ -972,7 +1030,7 @@ export const storage = {
       }
     }
 
-    return { scanned: found.length, added, updated, missing, inferred };
+    return { scanned: found.length, added, updated, missing, inferred, warnings, mediaDir: root };
   },
 
   // ===== Thumbnails =====

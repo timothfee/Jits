@@ -122,6 +122,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.post("/api/instructionals/scan", (_req, res) => {
     try {
       const result = storage.scanLibrary();
+      // Surface skipped-folder warnings in the container logs so they can be
+      // diagnosed alongside the startup MEDIA_DIR status line.
+      if (result.warnings && result.warnings.length > 0) {
+        for (const w of result.warnings) console.warn(`[scan] ${w}`);
+      }
       res.json(result);
     } catch (err: any) {
       res.status(500).json({ message: err.message });

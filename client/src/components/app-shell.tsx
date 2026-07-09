@@ -62,10 +62,18 @@ export function AppShell({ children }: { children: ReactNode }) {
     mutationFn: async () => apiRequest("POST", "/api/instructionals/scan"),
     onSuccess: async (res) => {
       const data = await res.json();
-      toast({
-        title: "Library scan complete",
-        description: `Added ${data.added} • Updated ${data.updated} • Missing ${data.missing}`,
-      });
+      if (data?.error) {
+        toast({
+          title: "Scan found nothing",
+          description: data.error,
+          variant: "destructive",
+        });
+      } else {
+        toast({
+          title: "Library scan complete",
+          description: `Added ${data.added} • Updated ${data.updated} • Missing ${data.missing}`,
+        });
+      }
       qc.invalidateQueries({ queryKey: ["/api/instructionals"] });
       qc.invalidateQueries({ queryKey: ["/api/stats"] });
     },

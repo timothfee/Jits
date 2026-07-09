@@ -33,6 +33,69 @@ Built with Express + React + Vite + Tailwind + Drizzle ORM (SQLite). Ships as a 
 
 Your database lives in the `jits-data` volume, so metadata survives container updates.
 
+## Troubleshooting: "Scan finds nothing"
+
+If **Scan library** runs but reports `0 scanned` / nothing appears, it's almost always one of these. Check the container logs first — the app now prints a startup line like:
+
+```
+[storage] MEDIA_DIR=/media | uid=1001 gid=1001 | readable   # good
+[storage] MEDIA_DIR=/media | uid=1001 gid=1001 | MISSING    # wrong volume mapping
+[storage] MEDIA_DIR=/media | uid=1001 gid=1001 | NOT READABLE (permission denied)  # permissions
+```
+
+The scan also surfaces the same problem as a red message in Settings and a destructive toast.
+
+### 1. Wrong volume mapping
+
+The container expects your instructionals at `/media`. In your NAS Docker UI, map:
+
+- **Host path**: `/volume1/Media/Instructionals`
+- **Container path**: `/media`
+
+Verify the container can actually see your files — many NAS Docker UIs have a terminal/console into the container. Run:
+
+```sh
+ls -la /media
+```
+
+If `/media` is empty, the host path isn't reaching the container.
+
+### 2. Permissions (most common on Synology / UGREEN / QNAP)
+
+The container runs as a **non-root user `uid 1001 / gid 1001`** for safety. NAS shared folders are usually owned by `root` or another user, so `1001` can't read them — and a read-only (`:ro`) mount doesn't change that (read-only blocks writes, not reads). The scan then silently found nothing.
+
+Fixes, easiest first:
+
+- **Run the container as a user that can read the folder.** In `docker-compose.yml` add a `user:` line matching your NAS user, or temporarily `0:0` (root) to confirm the diagnosis, then tighten:
+
+  ```yaml
+  services:
+    jits-library:
+      user: "0:0"          # root — quick test
+  ```
+
+  > **Caveat:** if you test as root (`0:0`) and then switch back to the non-root
+  > `uid 1001`, files root created in `/data` (DB, thumbnails) may no longer be
+  > writable by `1001`. After confirming, either `chown -R 1001:1001` the `jits-data`
+  > volume, or wipe it (`docker volume rm`) to start fresh.
+
+  (When running as root, also drop the read-only `:ro` restriction only if you want writes — for media you generally keep `:ro`.)
+
+- **Grant the container user read access** on the host folder so it can stay non-root:
+
+  ```sh
+  # on the NAS host
+  chown -R 1001:1001 /volume1/Media/Instructionals   # make 1001 the owner
+  # or, less invasive — grant group read+execute
+  chgrp -R 1001 /volume1/Media/Instructionals && chmod -R g+rx /volume1/Media/Instructionals
+  ```
+
+- **Run as your NAS user's uid/gid.** Find them (`id` on the NAS as the media owner), then set `user: "<uid>:<gid>"`.
+
+### 3. Folder layout
+
+Scan groups files into one instructional per `<Instructor>/<Title>` folder (see below). Files must be at least 3 segments deep (`Instructor/Title/file.mkv`) to group. A flat folder of loose `.mkv` files still indexes — just as one instructional per file.
+
 ### Adding instructionals
 
 - **From your folder**: drop video files (`.mp4`, `.mkv`, `.webm`, `.mov`, …) into your mounted `/media` directory and hit **Scan library**. New files are added; moved/deleted files are marked missing.
@@ -81,7 +144,7 @@ client/src/
 | `POST`/`PATCH`/`DELETE` | `/api/instructionals/:id` | Create / edit (incl. tags) / delete |
 | `PATCH` | `/api/instructionals/:id/progress` | Update watch progress / watched flag |
 | `POST` | `/api/instructionals/scan` | Scan the media folder |
-| `GET` | `/api/stream/:id` | Stream the video (HTTP 206 range support; 302 redirect for remote URLs) |
+| `GET` | `/api/videos/:videoId/stream` | Stream one video part (HTTP 206 range support; 302 redirect for remote URLs) |
 | `GET/POST/PATCH/DELETE` | `/api/instructors` · `/api/positions` · `/api/categories` · `/api/tags` | Vocabularies |
 | `GET` | `/api/stats` | Library stats |
 
