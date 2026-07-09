@@ -38,7 +38,9 @@ export const tags = sqliteTable("tags", {
   createdAt: integer("created_at").notNull(),
 });
 
-// ---------- Instructionals (a single video / volume entry) ----------
+// ---------- Instructionals (a folder / volume entry) ----------
+// An instructional represents a TITLE FOLDER (e.g. "Outside Funk"), not a
+// single file. The video file(s) inside it are stored in `instructionalVideos`.
 export const instructionals = sqliteTable("instructionals", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   title: text("title").notNull(),
@@ -46,16 +48,37 @@ export const instructionals = sqliteTable("instructionals", {
   instructorId: integer("instructor_id"),
   positionId: integer("position_id"),
   techniqueCategoryId: integer("technique_category_id"),
-  filePath: text("file_path").notNull(), // relative path within MEDIA_DIR, or an http(s) URL
-  fileName: text("file_name").notNull(),
-  fileSize: integer("file_size"), // bytes
-  duration: integer("duration"), // seconds
-  thumbnail: text("thumbnail"), // relative path or URL
+  // Relative path of the title folder within MEDIA_DIR (null for manually-added
+  // / remote entries with no real folder). Used as the scan grouping key.
+  folderPath: text("folder_path"),
+  // Denormalized for fast homepage rendering: first part's thumbnail + sum of
+  // part durations. Kept in sync by syncInstructionalRollup().
+  duration: integer("duration"), // seconds (sum of parts)
+  thumbnail: text("thumbnail"), // relative filename in THUMBNAIL_DIR
   notes: text("notes"),
   rating: integer("rating").default(0), // 0-5
   watched: integer("watched", { mode: "boolean" }).notNull().default(false),
-  progress: integer("progress").notNull().default(0), // seconds watched
-  available: integer("available", { mode: "boolean" }).notNull().default(true), // file still on disk
+  progress: integer("progress").notNull().default(0), // seconds watched (last played part)
+  // Which video part the saved progress belongs to (so multi-part resume lands
+  // on the right file). Null = start from the first part.
+  progressVideoId: integer("progress_video_id"),
+  available: integer("available", { mode: "boolean" }).notNull().default(true), // folder still on disk
+  createdAt: integer("created_at").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+});
+
+// ---------- Instructional videos (the parts/files inside a folder) ----------
+export const instructionalVideos = sqliteTable("instructional_videos", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  instructionalId: integer("instructional_id")
+    .notNull()
+    .references(() => instructionals.id, { onDelete: "cascade" }),
+  filePath: text("file_path").notNull(), // relative path within MEDIA_DIR, or an http(s) URL
+  fileName: text("file_name").notNull(),
+  fileSize: integer("file_size"), // bytes
+  duration: integer("duration"), // seconds (this part only)
+  sortOrder: integer("sort_order").notNull().default(0),
+  available: integer("available", { mode: "boolean" }).notNull().default(true),
   createdAt: integer("created_at").notNull(),
   updatedAt: integer("updated_at").notNull(),
 });
@@ -91,6 +114,11 @@ export const insertInstructionalSchema = createInsertSchema(instructionals).omit
   createdAt: true,
   updatedAt: true,
 });
+export const insertInstructionalVideoSchema = createInsertSchema(instructionalVideos).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
 
 // Custom update schema: everything optional except nothing required
 export const updateInstructionalSchema = insertInstructionalSchema.partial();
@@ -111,6 +139,9 @@ export type InsertTag = z.infer<typeof insertTagSchema>;
 export type Instructional = typeof instructionals.$inferSelect;
 export type InsertInstructional = z.infer<typeof insertInstructionalSchema>;
 
+export type InstructionalVideo = typeof instructionalVideos.$inferSelect;
+export type InsertInstructionalVideo = z.infer<typeof insertInstructionalVideoSchema>;
+
 export type InstructionalTag = typeof instructionalTags.$inferSelect;
 
 // ---------- Rich types (instructional with relations) ----------
@@ -119,6 +150,7 @@ export type InstructionalWithRelations = Instructional & {
   position?: Position | null;
   techniqueCategory?: TechniqueCategory | null;
   tags: Tag[];
+  videos: InstructionalVideo[];
 };
 
 // Allowed video extensions

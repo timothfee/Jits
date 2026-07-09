@@ -3,7 +3,7 @@ import { Link } from "wouter";
 import { Play, CheckCircle2, AlertTriangle } from "lucide-react";
 import type { InstructionalWithRelations } from "@shared/schema";
 import { TechniqueBadge } from "./technique-badge";
-import { formatDuration, formatBytes, formatRelative, hexToRgba } from "@/lib/format";
+import { formatDuration, hexToRgba } from "@/lib/format";
 import { apiUrl } from "@/lib/queryClient";
 
 export function InstructionalCard({
@@ -104,9 +104,11 @@ export function InstructionalCard({
         </div>
         <div className="flex items-center justify-between gap-2 pt-1">
           <TechniqueBadge category={item.techniqueCategory} size="sm" />
-          <span className="text-[10px] text-muted-foreground/70 font-mono">
-            {formatBytes(item.fileSize)}
-          </span>
+          {item.videos.length > 1 && (
+            <span className="text-[10px] text-muted-foreground/70 font-mono">
+              {item.videos.length} parts
+            </span>
+          )}
         </div>
         {progressPct > 0 && (
           <div className="h-1 rounded-full bg-muted overflow-hidden">

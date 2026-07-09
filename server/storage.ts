@@ -5,13 +5,16 @@ import {
   tags,
   instructionals,
   instructionalTags,
+  instructionalVideos,
   type Instructional,
   type InstructionalWithRelations,
   type Instructor,
   type Position,
   type TechniqueCategory,
   type Tag,
+  type InstructionalVideo,
   type InsertInstructional,
+  type InsertInstructionalVideo,
   type InsertInstructor,
   type InsertPosition,
   type InsertTechniqueCategory,
@@ -37,7 +40,7 @@ sqlite.pragma("journal_mode = WAL");
 sqlite.pragma("foreign_keys = ON");
 
 export const db = drizzle(sqlite, {
-  schema: { instructors, positions, techniqueCategories, tags, instructionals, instructionalTags },
+  schema: { instructors, positions, techniqueCategories, tags, instructionals, instructionalTags, instructionalVideos },
 });
 
 // Media directory (mounted volume in Docker)
@@ -105,32 +108,44 @@ async function generateThumbnail(id: number): Promise<string | null> {
   const item = db.select().from(instructionals).where(eq(instructionals.id, id)).get();
   if (!item) return null;
 
+  // Use the first AVAILABLE video part as the source frame (skip parts whose
+  // file is missing on disk).
+  const part = db
+    .select()
+    .from(instructionalVideos)
+    .where(and(eq(instructionalVideos.instructionalId, id), eq(instructionalVideos.available, true)))
+    .orderBy(asc(instructionalVideos.sortOrder), asc(instructionalVideos.id))
+    .get();
+  if (!part) return null;
+
   // Remote URL or local path — both are valid ffmpeg inputs.
-  const local = resolveLocalSource(item.filePath);
-  const isRemote = /^https?:\/\//i.test(item.filePath);
+  const local = resolveLocalSource(part.filePath);
+  const isRemote = /^https?:\/\//i.test(part.filePath);
   // Only fetch arbitrary remote URLs for thumbnailing when explicitly allowed
   // (demo preview) — avoids server-side fetching of user-entered URLs in
   // normal Docker installs.
   const allowRemote =
     process.env.DEMO_SEED === "true" || process.env.ALLOW_REMOTE_THUMBNAILS === "true";
   if (isRemote && !allowRemote) return null;
-  const source = local ?? (isRemote ? item.filePath : null);
+  const source = local ?? (isRemote ? part.filePath : null);
   if (!source) return null;
 
-  // Duration: prefer existing DB value, else probe.
-  let duration = item.duration ?? null;
-  if (!duration) {
-    duration = await probeDuration(source);
-    if (duration) {
-      db.update(instructionals)
-        .set({ duration: Math.round(duration), updatedAt: now() })
-        .where(eq(instructionals.id, id))
+  // Probe this part's duration if missing, then keep the instructional's
+  // denormalized duration in sync.
+  let partDuration = part.duration ?? null;
+  if (!partDuration) {
+    partDuration = await probeDuration(source);
+    if (partDuration) {
+      db.update(instructionalVideos)
+        .set({ duration: Math.round(partDuration), updatedAt: now() })
+        .where(eq(instructionalVideos.id, part.id))
         .run();
     }
   }
+  syncInstructionalRollup(id);
 
   // Seek ~10% in, clamped to [1, 30]s so short clips and long films both land sensibly.
-  const seek = duration ? Math.max(1, Math.min(duration * 0.1, 30)) : 5;
+  const seek = partDuration ? Math.max(1, Math.min(partDuration * 0.1, 30)) : 5;
   const outName = `instructional-${id}.jpg`;
   const outPath = path.join(THUMBNAIL_DIR, outName);
 
@@ -162,6 +177,7 @@ async function generateThumbnail(id: number): Promise<string | null> {
     .set({ thumbnail: outName, updatedAt: now() })
     .where(eq(instructionals.id, id))
     .run();
+  syncInstructionalRollup(id);
   return outName;
 }
 
@@ -205,15 +221,14 @@ function initDb() {
       instructor_id INTEGER,
       position_id INTEGER,
       technique_category_id INTEGER,
-      file_path TEXT NOT NULL,
-      file_name TEXT NOT NULL,
-      file_size INTEGER,
+      folder_path TEXT,
       duration INTEGER,
       thumbnail TEXT,
       notes TEXT,
       rating INTEGER DEFAULT 0,
       watched INTEGER NOT NULL DEFAULT 0,
       progress INTEGER NOT NULL DEFAULT 0,
+      progress_video_id INTEGER,
       available INTEGER NOT NULL DEFAULT 1,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
@@ -228,16 +243,125 @@ function initDb() {
       FOREIGN KEY (instructional_id) REFERENCES instructionals(id) ON DELETE CASCADE,
       FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE
     );
+    CREATE TABLE IF NOT EXISTS instructional_videos (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      instructional_id INTEGER NOT NULL,
+      file_path TEXT NOT NULL,
+      file_name TEXT NOT NULL,
+      file_size INTEGER,
+      duration INTEGER,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      available INTEGER NOT NULL DEFAULT 1,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (instructional_id) REFERENCES instructionals(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_instructional_videos_instr ON instructional_videos(instructional_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_instructional_videos_path ON instructional_videos(file_path);
   `);
 }
+
+// ---------- Migration for existing volumes (pre-folder-schema) ----------
+// Older installs stored one row per file on `instructionals` (file_path/file_name/
+// file_size columns). This migrates them to the folder+part model: each old row
+// becomes one instructional with a single video part. SQLite keeps the now-unused
+// columns around harmlessly. Safe to run repeatedly (idempotent).
+function hasColumn(table: string, col: string): boolean {
+  const rows = sqlite.prepare(`PRAGMA table_info(${table})`).all() as any[];
+  return rows.some((r) => r.name === col);
+}
+function migrate() {
+  // Ensure new instructionals columns exist on older databases.
+  if (!hasColumn("instructionals", "folder_path")) {
+    sqlite.exec(`ALTER TABLE instructionals ADD COLUMN folder_path TEXT;`);
+  }
+  if (!hasColumn("instructionals", "progress_video_id")) {
+    sqlite.exec(`ALTER TABLE instructionals ADD COLUMN progress_video_id INTEGER;`);
+  }
+  // instructional_videos is created by initDb(); confirm it exists here too.
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS instructional_videos (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      instructional_id INTEGER NOT NULL,
+      file_path TEXT NOT NULL,
+      file_name TEXT NOT NULL,
+      file_size INTEGER,
+      duration INTEGER,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      available INTEGER NOT NULL DEFAULT 1,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (instructional_id) REFERENCES instructionals(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_instructional_videos_instr ON instructional_videos(instructional_id);
+  `);
+  // Only attempt the file_path → part migration if the legacy column is present.
+  if (hasColumn("instructionals", "file_path")) {
+    const legacy = sqlite.prepare(
+      `SELECT id, file_path, file_name, file_size, duration FROM instructionals WHERE file_path IS NOT NULL`
+    ).all() as { id: number; file_path: string; file_name: string; file_size: number | null; duration: number | null }[];
+    const ts = now();
+    const ins = sqlite.prepare(`INSERT OR IGNORE INTO instructional_videos
+      (instructional_id, file_path, file_name, file_size, duration, sort_order, available, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, 0, 1, ?, ?)`);
+    const setFolder = sqlite.prepare(`UPDATE instructionals SET folder_path = ? WHERE id = ? AND folder_path IS NULL`);
+    for (const row of legacy) {
+      ins.run(row.id, row.file_path, row.file_name, row.file_size, row.duration, ts, ts);
+      // Derive a folder_path from the legacy file path so re-scans match this row.
+      const norm = row.file_path.replace(/\\/g, "/");
+      const segs = norm.split("/").filter(Boolean);
+      let folder: string | null = null;
+      if (segs.length >= 3) folder = `${segs[0]}/${segs[1]}`;
+      else if (segs.length === 2) folder = segs[0];
+      else folder = norm;
+      if (folder) setFolder.run(folder, row.id);
+    }
+  }
+}
 initDb();
+migrate();
+normalizeLibrary();
 
 // ---------- Helpers ----------
 function now() {
   return Date.now();
 }
 
-function attachTags(rows: Instructional[]): InstructionalWithRelations[] {
+// One-time startup normalization (also re-run at the top of scanLibrary):
+// merge any duplicate instructionals sharing a folderPath into the canonical
+// (lowest-id) one — reparent their video parts, then delete the empties — and
+// recompute denormalized rollup fields for anything with parts. This keeps the
+// homepage correct on upgrade even before the user clicks Scan.
+function normalizeLibrary() {
+  const existing = db.select().from(instructionals).all();
+  const seen = new Map<string, Instructional>();
+  for (const e of existing) {
+    if (!e.folderPath) continue;
+    const prior = seen.get(e.folderPath);
+    if (!prior || e.id < prior.id) seen.set(e.folderPath, e);
+  }
+  for (const e of existing) {
+    if (!e.folderPath) continue;
+    const canon = seen.get(e.folderPath);
+    if (canon && e.id !== canon.id) {
+      db.update(instructionalVideos)
+        .set({ instructionalId: canon.id, updatedAt: now() })
+        .where(eq(instructionalVideos.instructionalId, e.id))
+        .run();
+      db.delete(instructionals).where(eq(instructionals.id, e.id)).run();
+    }
+  }
+  // Re-rollup anything that has parts so duration/availability are correct after
+  // a legacy migration or part reparenting.
+  const withParts = db
+    .select({ id: instructionalVideos.instructionalId })
+    .from(instructionalVideos)
+    .groupBy(instructionalVideos.instructionalId)
+    .all();
+  for (const r of withParts) syncInstructionalRollup(r.id);
+}
+
+function attachTags(rows: Instructional[]): (Instructional & { tags: Tag[] })[] {
   if (rows.length === 0) return [];
   const ids = rows.map((r) => r.id);
   const tagRows = db
@@ -262,12 +386,31 @@ function attachTags(rows: Instructional[]): InstructionalWithRelations[] {
   }));
 }
 
+function attachVideos(rows: Instructional[]): Map<number, InstructionalVideo[]> {
+  const map = new Map<number, InstructionalVideo[]>();
+  if (rows.length === 0) return map;
+  const ids = rows.map((r) => r.id);
+  const vids = db
+    .select()
+    .from(instructionalVideos)
+    .where(inArray(instructionalVideos.instructionalId, ids))
+    .orderBy(asc(instructionalVideos.sortOrder), asc(instructionalVideos.id))
+    .all();
+  for (const v of vids) {
+    const arr = map.get(v.instructionalId) || [];
+    arr.push(v);
+    map.set(v.instructionalId, arr);
+  }
+  return map;
+}
+
 function enrich(
   rows: Instructional[],
   instructorMap: Map<number, Instructor>,
   positionMap: Map<number, Position>,
   categoryMap: Map<number, TechniqueCategory>
 ): InstructionalWithRelations[] {
+  const videoMap = attachVideos(rows);
   return attachTags(rows).map((r) => ({
     ...r,
     instructor: r.instructorId ? instructorMap.get(r.instructorId) ?? null : null,
@@ -275,7 +418,26 @@ function enrich(
     techniqueCategory: r.techniqueCategoryId
       ? categoryMap.get(r.techniqueCategoryId) ?? null
       : null,
+    videos: videoMap.get(r.id) || [],
   }));
+}
+
+// Recompute denormalized rollup fields on an instructional from its parts:
+//   duration = sum of part durations
+//   available = any part available
+// (thumbnail is managed by generateThumbnail; this leaves it untouched.)
+function syncInstructionalRollup(id: number) {
+  const parts = db
+    .select()
+    .from(instructionalVideos)
+    .where(eq(instructionalVideos.instructionalId, id))
+    .all();
+  const duration = parts.reduce((sum, p) => sum + (p.duration ?? 0), 0);
+  const available = parts.some((p) => p.available);
+  db.update(instructionals)
+    .set({ duration: duration || null, available, updatedAt: now() })
+    .where(eq(instructionals.id, id))
+    .run();
 }
 
 function loadLookups() {
@@ -288,24 +450,30 @@ function loadLookups() {
   return { instructorMap, positionMap, categoryMap };
 }
 
-// Derive an instructor name and title from a video's path relative to MEDIA_DIR.
-// Supports the common layout:
-//   <Instructor>/<Title>/<file>.mkv   -> instructor = "Instructor", title = "Title"
-// Shallower layouts degrade gracefully:
-//   <Instructor>/<file>.mkv            -> instructor = "Instructor", title = filename
-//   <file>.mkv                         -> no instructor, title = filename
-// Returns null for instructor when it can't be inferred.
-function deriveFromPath(rel: string): { instructor: string | null; title: string } {
+// Derive the folder grouping key, instructor, and title from a video's path
+// relative to MEDIA_DIR.
+//   <Instructor>/<Title>/<file>.mkv (and deeper) -> folderPath = Instructor/Title,
+//     instructor = Instructor, title = Title
+//   Shallower layouts (<=2 segments) don't group: folderPath = the file path
+//   itself (unique per file), title = filename, instructor = first segment if any.
+function deriveFolderFromPath(rel: string): {
+  folderPath: string;
+  instructor: string | null;
+  title: string;
+} {
   const norm = rel.replace(/\\/g, "/"); // tolerate Windows-style separators
   const parts = norm.split("/").filter(Boolean);
   const file = parts[parts.length - 1] || rel;
   const titleFromFile = path.basename(file, path.extname(file));
-  // Need at least <Instructor>/<file> to infer an instructor.
-  if (parts.length < 2) return { instructor: null, title: titleFromFile };
-  const instructor = parts[0];
-  // 3+ segments => <Instructor>/<Title>/<file> : prefer the title folder.
-  const title = parts.length >= 3 ? parts[parts.length - 2] : titleFromFile;
-  return { instructor, title };
+  if (parts.length >= 3) {
+    return { folderPath: `${parts[0]}/${parts[1]}`, instructor: parts[0], title: parts[1] };
+  }
+  // 1-2 segments: per-file instructional (no folder grouping).
+  return {
+    folderPath: norm,
+    instructor: parts.length === 2 ? parts[0] : null,
+    title: titleFromFile,
+  };
 }
 
 // Find an instructor by exact name, creating one if it doesn't exist yet.
@@ -314,6 +482,10 @@ function getOrCreateInstructor(name: string): Instructor {
   if (existing) return existing;
   return db.insert(instructors).values({ name, createdAt: now() }).returning().get();
 }
+
+// A video part as supplied by the API/frontend (no instructionalId — the
+// storage layer injects it from the parent instructional). Used by create/update.
+export type VideoPartInput = Omit<InsertInstructionalVideo, "instructionalId">;
 
 // ---------- Filters ----------
 export interface InstructionalFilter {
@@ -334,12 +506,12 @@ export const storage = {
     if (filter.q) {
       const term = `%${filter.q}%`;
       conditions.push(
-        or(
-          like(instructionals.title, term),
-          like(instructionals.description, term),
-          like(instructionals.fileName, term)
-        )!
-      );
+          or(
+            like(instructionals.title, term),
+            like(instructionals.description, term),
+            like(instructionals.folderPath, term)
+          )!
+        );
     }
     if (filter.instructorId) conditions.push(eq(instructionals.instructorId, filter.instructorId));
     if (filter.techniqueCategoryId)
@@ -391,22 +563,66 @@ export const storage = {
     return enrich([row], instructorMap, positionMap, categoryMap)[0];
   },
 
-  createInstructional(data: InsertInstructional): InstructionalWithRelations {
+  createInstructional(
+    data: InsertInstructional,
+    videos?: VideoPartInput[]
+  ): InstructionalWithRelations {
     const ts = now();
+    const { videos: _omit, ...rest } = data as any;
     const row = db
       .insert(instructionals)
-      .values({ ...data, createdAt: ts, updatedAt: ts })
+      .values({ ...rest, createdAt: ts, updatedAt: ts })
       .returning()
       .get();
+    // Compatibility: a legacy client may still send `filePath` instead of a
+    // videos[] array — fold it into a single video part.
+    const legacyPath = (data as any).filePath;
+    const parts: VideoPartInput[] = videos ?? (legacyPath ? [{ filePath: String(legacyPath), fileName: String((data as any).fileName ?? legacyPath), fileSize: (data as any).fileSize ?? null, duration: data.duration ?? null, sortOrder: 0, available: true }] : []);
+    if (parts.length) this.replaceVideos(row.id, parts);
+    syncInstructionalRollup(row.id);
     return this.getInstructional(row.id)!;
   },
 
-  updateInstructional(id: number, data: Partial<InsertInstructional>): InstructionalWithRelations | undefined {
+  updateInstructional(
+    id: number,
+    data: Partial<InsertInstructional> & { videos?: VideoPartInput[] }
+  ): InstructionalWithRelations | undefined {
+    const { videos, ...rest } = data as any;
     db.update(instructionals)
-      .set({ ...data, updatedAt: now() })
+      .set({ ...rest, updatedAt: now() })
       .where(eq(instructionals.id, id))
       .run();
+    // Only touch parts when `videos` is explicitly present (array). Omitted =
+    // preserve; empty array = clear all parts.
+    if (Array.isArray(videos)) {
+      this.replaceVideos(id, videos);
+      syncInstructionalRollup(id);
+    }
     return this.getInstructional(id);
+  },
+
+  // Replace all video parts for an instructional. Used by create/update when a
+  // videos[] array is supplied. Preserves sortOrder from the supplied array
+  // (or defaults to the array index).
+  replaceVideos(id: number, videos: VideoPartInput[]) {
+    db.delete(instructionalVideos).where(eq(instructionalVideos.instructionalId, id)).run();
+    if (!videos.length) return;
+    const ts = now();
+    db.insert(instructionalVideos)
+      .values(
+        videos.map((v, i) => ({
+          instructionalId: id,
+          filePath: v.filePath,
+          fileName: v.fileName,
+          fileSize: v.fileSize ?? null,
+          duration: v.duration ?? null,
+          sortOrder: v.sortOrder ?? i,
+          available: v.available ?? true,
+          createdAt: ts,
+          updatedAt: ts,
+        }))
+      )
+      .run();
   },
 
   setInstructionalTags(id: number, tagIds: number[]) {
@@ -418,12 +634,23 @@ export const storage = {
     }
   },
 
-  updateProgress(id: number, progress: number, watched: boolean) {
+  updateProgress(
+    id: number,
+    progress: number,
+    watched: boolean,
+    progressVideoId?: number | null
+  ) {
     db.update(instructionals)
-      .set({ progress, watched, updatedAt: now() })
+      .set({ progress, watched, progressVideoId: progressVideoId ?? undefined, updatedAt: now() })
       .where(eq(instructionals.id, id))
       .run();
     return this.getInstructional(id);
+  },
+
+  // Fetch a single video part by id (used by the stream route). Returns the part
+  // together with its parent instructional id so the route can validate access.
+  getVideo(videoId: number): InstructionalVideo | undefined {
+    return db.select().from(instructionalVideos).where(eq(instructionalVideos.id, videoId)).get();
   },
 
   deleteInstructional(id: number) {
@@ -564,6 +791,10 @@ export const storage = {
   },
 
   // ===== Library scan =====
+  // Walks MEDIA_DIR for video files, groups them into folder-based
+  // instructionals (one row per title folder), and upserts the individual
+  // files as video parts. Returns counters for the UI. Idempotent: re-running
+  // on an unchanged library changes nothing.
   scanLibrary(): {
     scanned: number;
     added: number;
@@ -589,7 +820,7 @@ export const storage = {
           } else if (entry.isFile()) {
             const ext = path.extname(entry.name).toLowerCase();
             if (VIDEO_EXTENSIONS.includes(ext)) {
-              const rel = path.relative(root, full);
+              const rel = path.relative(root, full).replace(/\\/g, "/");
               let size = 0;
               try {
                 size = fs.statSync(full).size;
@@ -602,69 +833,142 @@ export const storage = {
       walk(root);
     }
 
+    // Group found files by their derived folder key (Instructor/Title for
+    // 3+ segment paths, otherwise the file path itself — per-file instructionals).
+    const groups = new Map<
+      string,
+      { files: { rel: string; name: string; size: number }[] }
+    >();
+    for (const f of found) {
+      const { folderPath } = deriveFolderFromPath(f.rel);
+      const g = groups.get(folderPath) || { files: [] };
+      g.files.push(f);
+      groups.set(folderPath, g);
+    }
+
+    // Existing instructionals — normalize first (merge duplicate folders,
+    // reparent stray parts) so each folder maps to exactly one row.
+    normalizeLibrary();
     const existing = db.select().from(instructionals).all();
-    const byPath = new Map(existing.map((e) => [e.filePath, e]));
+    const folderToId = new Map<string, number>();
+    for (const e of existing) {
+      if (e.folderPath) folderToId.set(e.folderPath, e.id);
+    }
+    const byId = new Map(existing.map((e) => [e.id, e]));
+
+    // Existing video parts keyed by filePath, for upsert detection.
+    const existingParts = db.select().from(instructionalVideos).all();
+    const partByPath = new Map(existingParts.map((p) => [p.filePath, p]));
+
     let added = 0;
     let updated = 0;
     let inferred = 0;
-    const seenPaths = new Set<string>();
+    const seenPartPaths = new Set<string>();
+    const ts = now();
 
-    for (const f of found) {
-      seenPaths.add(f.rel);
-      const ex = byPath.get(f.rel);
-      if (ex) {
+    for (const [folderPath, group] of groups) {
+      // Sort files within a folder by name so part order is stable.
+      group.files.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+
+      let instructionalId = folderToId.get(folderPath);
+      const isNew = !instructionalId;
+      if (isNew) {
+        const sample = group.files[0].rel;
+        const { instructor, title } = deriveFolderFromPath(sample);
+        const instructorId = instructor ? getOrCreateInstructor(instructor).id : undefined;
+        if (instructor) inferred++;
+        const row = db
+          .insert(instructionals)
+          .values({
+            title,
+            instructorId,
+            folderPath,
+            available: true,
+            createdAt: ts,
+            updatedAt: ts,
+          })
+          .returning()
+          .get();
+        instructionalId = row.id;
+        added++;
+      } else {
         // Backfill a missing instructor from the folder layout (non-destructive:
-        // never overrides an instructor the user already set).
-        if (!ex.instructorId) {
-          const { instructor } = deriveFromPath(f.rel);
+        // never overrides one the user already set).
+        const ex = byId.get(instructionalId!);
+        if (ex && !ex.instructorId) {
+          const { instructor } = deriveFolderFromPath(group.files[0].rel);
           if (instructor) {
             const ins = getOrCreateInstructor(instructor);
             db.update(instructionals)
-              .set({ instructorId: ins.id, updatedAt: now() })
+              .set({ instructorId: ins.id, updatedAt: ts })
               .where(eq(instructionals.id, ex.id))
               .run();
             inferred++;
           }
         }
-        if (!ex.available || ex.fileSize !== f.size) {
-          // File changed (or reappeared): invalidate the cached thumbnail and
-          // duration so the next "Generate thumbnails" run regenerates them.
-          db.update(instructionals)
-            .set({ available: true, fileSize: f.size, thumbnail: null, duration: null, updatedAt: now() })
-            .where(eq(instructionals.id, ex.id))
-            .run();
-          updated++;
-        }
-      } else {
-        const { instructor, title } = deriveFromPath(f.rel);
-        const instructorId = instructor ? getOrCreateInstructor(instructor).id : undefined;
-        db.insert(instructionals)
-          .values({
-            title,
-            instructorId,
-            filePath: f.rel,
-            fileName: f.name,
-            fileSize: f.size,
-            available: true,
-            createdAt: now(),
-            updatedAt: now(),
-          })
-          .returning()
-          .get();
-        if (instructor) inferred++;
-        added++;
       }
+
+      // Upsert each file as a video part. sortOrder = position within folder.
+      for (let i = 0; i < group.files.length; i++) {
+        const f = group.files[i];
+        seenPartPaths.add(f.rel);
+        const exPart = partByPath.get(f.rel);
+        if (exPart) {
+          // Reparent if it landed on a (now-deleted) duplicate, refresh size /
+          // availability / sort order. If the file size changed (file replaced),
+          // clear the cached duration so ffprobe re-probes it next time.
+          const sizeChanged = exPart.fileSize !== f.size;
+          const changed =
+            exPart.instructionalId !== instructionalId ||
+            sizeChanged ||
+            !exPart.available ||
+            exPart.sortOrder !== i;
+          if (changed) {
+            db.update(instructionalVideos)
+              .set({
+                instructionalId: instructionalId!,
+                fileSize: f.size,
+                available: true,
+                sortOrder: i,
+                duration: sizeChanged ? null : exPart.duration,
+                updatedAt: ts,
+              })
+              .where(eq(instructionalVideos.id, exPart.id))
+              .run();
+            updated++;
+          }
+        } else {
+          db.insert(instructionalVideos)
+            .values({
+              instructionalId: instructionalId!,
+              filePath: f.rel,
+              fileName: f.name,
+              fileSize: f.size,
+              sortOrder: i,
+              available: true,
+              createdAt: ts,
+              updatedAt: ts,
+            })
+            .run();
+          if (!isNew) updated++;
+        }
+      }
+
+      syncInstructionalRollup(instructionalId!);
     }
 
-    // Mark missing files unavailable
+    // Mark missing parts unavailable (file deleted from disk), then roll up so
+    // a folder with no remaining parts becomes unavailable too.
     let missing = 0;
-    for (const ex of existing) {
-      if (!seenPaths.has(ex.filePath) && ex.available && !/^https?:\/\//i.test(ex.filePath)) {
-        db.update(instructionals)
-          .set({ available: false, updatedAt: now() })
-          .where(eq(instructionals.id, ex.id))
+    for (const p of existingParts) {
+      if (/^https?:\/\//i.test(p.filePath)) continue; // remote parts are never "missing"
+      if (!seenPartPaths.has(p.filePath) && p.available) {
+        db.update(instructionalVideos)
+          .set({ available: false, updatedAt: ts })
+          .where(eq(instructionalVideos.id, p.id))
           .run();
         missing++;
+        if (p.instructionalId) syncInstructionalRollup(p.instructionalId);
       }
     }
 
@@ -846,6 +1150,9 @@ export const storage = {
     ];
 
     for (const s of samples) {
+      // Synthetic, stable folder paths keep the demo entries grouped like a real
+      // library (Instructor/Title). The single sample video URL becomes one part.
+      const folderPath = `demo/${instr[s.instructorIdx].name}/${s.title}`;
       const ins = db
         .insert(instructionals)
         .values({
@@ -854,8 +1161,7 @@ export const storage = {
           instructorId: instrIds[s.instructorIdx],
           positionId: posByName.get(s.position)?.id,
           techniqueCategoryId: catBySlug.get(s.catSlug)?.id,
-          filePath: s.url,
-          fileName: s.title,
+          folderPath,
           // duration intentionally left unset — ffprobe fills it during
           // thumbnail generation.
           available: true,
@@ -864,6 +1170,17 @@ export const storage = {
         })
         .returning()
         .get();
+      db.insert(instructionalVideos)
+        .values({
+          instructionalId: ins.id,
+          filePath: s.url,
+          fileName: s.title,
+          sortOrder: 0,
+          available: true,
+          createdAt: ts,
+          updatedAt: ts,
+        })
+        .run();
       const tagIds = allTags.filter((t) => s.tags.includes(t.name)).map((t) => t.id);
       if (tagIds.length) {
         db.insert(instructionalTags)

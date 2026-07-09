@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { useParams, Link } from "wouter";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest, apiUrl } from "@/lib/queryClient";
@@ -32,12 +32,16 @@ import {
   Clock,
   HardDrive,
   Calendar,
+  Folder,
   Tag as TagIcon,
   Save,
   X,
   Plus,
+  ListVideo,
+  Play,
 } from "lucide-react";
 import { formatDuration, formatBytes, formatRelative } from "@/lib/format";
+import type { InstructionalVideo } from "@shared/schema";
 
 export default function InstructionalDetail() {
   const { id } = useParams();
@@ -46,6 +50,8 @@ export default function InstructionalDetail() {
   const { toast } = useToast();
   const [editOpen, setEditOpen] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const [currentVideoId, setCurrentVideoId] = useState<number | null>(null);
+  const [autoAdvance, setAutoAdvance] = useState(false);
 
   const item = useQuery({
     queryKey: ["/api/instructionals", numId],
@@ -56,9 +62,47 @@ export default function InstructionalDetail() {
     },
   });
 
+  const videos: InstructionalVideo[] = item.data?.videos ?? [];
+
+  // Pick the part to play: the one progress belongs to (if it still exists AND
+  // is available), otherwise the first available part, otherwise the first part.
+  const initialVideoId = useMemo(() => {
+    if (videos.length === 0) return null;
+    const byId = new Map(videos.map((v) => [v.id, v]));
+    const prog = item.data?.progressVideoId;
+    if (prog && byId.has(prog) && byId.get(prog)?.available) return prog;
+    return videos.find((v) => v.available)?.id ?? videos[0].id;
+  }, [item.data]);
+
+  useEffect(() => {
+    if (currentVideoId === null && initialVideoId !== null) {
+      setCurrentVideoId(initialVideoId);
+    }
+  }, [initialVideoId, currentVideoId]);
+
+  // When the instructional changes, reset to the resumed part.
+  useEffect(() => {
+    setCurrentVideoId(initialVideoId);
+    setAutoAdvance(false);
+  }, [item.data?.id, initialVideoId]);
+
+  const currentVideo =
+    videos.find((v) => v.id === currentVideoId) ?? videos[0] ?? null;
+
+  const currentIndex = currentVideo
+    ? videos.findIndex((v) => v.id === currentVideo.id)
+    : -1;
+  const nextVideo =
+    currentIndex >= 0 && currentIndex < videos.length - 1
+      ? videos[currentIndex + 1]
+      : null;
+
   const progressMutation = useMutation({
-    mutationFn: async (data: { progress: number; watched: boolean }) =>
-      apiRequest("PATCH", `/api/instructionals/${numId}/progress`, data),
+    mutationFn: async (data: {
+      progress: number;
+      watched: boolean;
+      progressVideoId?: number | null;
+    }) => apiRequest("PATCH", `/api/instructionals/${numId}/progress`, data),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["/api/instructionals", numId] });
       qc.invalidateQueries({ queryKey: ["/api/instructionals"] });
@@ -78,33 +122,68 @@ export default function InstructionalDetail() {
     progressMutation.mutate({
       progress: item.data?.progress || 0,
       watched: !item.data?.watched,
+      progressVideoId: currentVideo?.id ?? null,
+    });
+  };
+
+  const switchPart = (videoId: number) => {
+    setCurrentVideoId(videoId);
+    setAutoAdvance(false);
+    // Seek the new source to its start once it loads.
+    requestAnimationFrame(() => {
+      const v = videoRef.current;
+      if (v) v.currentTime = 0;
     });
   };
 
   const onTimeUpdate = () => {
     const v = videoRef.current;
-    if (!v || !item.data) return;
+    if (!v || !item.data || !currentVideo) return;
     // throttle: only persist every ~10s
     const sec = Math.floor(v.currentTime);
     if (sec % 10 === 0 && sec > 0 && sec !== item.data.progress) {
       const watched = v.duration ? v.currentTime / v.duration > 0.9 : false;
-      progressMutation.mutate({ progress: sec, watched });
+      progressMutation.mutate({
+        progress: sec,
+        watched,
+        progressVideoId: currentVideo.id,
+      });
+    }
+  };
+
+  // When the current part loads, resume from saved progress if this is the
+  // part the progress belongs to.
+  const onLoadedMetadata = () => {
+    const v = videoRef.current;
+    if (!v || !item.data || !currentVideo) return;
+    if (
+      item.data.progressVideoId === currentVideo.id &&
+      item.data.progress > 5
+    ) {
+      v.currentTime = item.data.progress;
     }
   };
 
   const onEnded = () => {
-    progressMutation.mutate({
-      progress: item.data?.duration || 0,
-      watched: true,
-    });
-  };
-
-  useEffect(() => {
-    const v = videoRef.current;
-    if (v && item.data?.progress && item.data.progress > 5) {
-      v.currentTime = item.data.progress;
+    if (nextVideo) {
+      // Finished a non-final part: record resume state for the NEXT part so a
+      // re-open lands on it (not the just-finished one), then advance.
+      progressMutation.mutate({
+        progress: 0,
+        watched: false,
+        progressVideoId: nextVideo.id,
+      });
+      setAutoAdvance(true);
+      setCurrentVideoId(nextVideo.id);
+    } else {
+      // Final part ended: mark the whole instructional watched.
+      progressMutation.mutate({
+        progress: currentVideo?.duration ?? item.data?.duration ?? 0,
+        watched: true,
+        progressVideoId: currentVideo?.id ?? null,
+      });
     }
-  }, [item.data?.id]);
+  };
 
   if (item.isLoading) {
     return (
@@ -131,9 +210,23 @@ export default function InstructionalDetail() {
   }
 
   const it = item.data;
+  // Aggregate progress across parts: sum durations of parts before the part
+  // that holds the saved progress, then add the saved seconds. Falls back to a
+  // simple ratio of the current part when durations are unknown.
+  const progVideoIdx = it.progressVideoId
+    ? videos.findIndex((v) => v.id === it.progressVideoId)
+    : -1;
+  const aggregateBefore =
+    progVideoIdx > 0
+      ? videos
+          .slice(0, progVideoIdx)
+          .reduce((s, v) => s + (v.duration ?? 0), 0)
+      : 0;
+  const aggregateProgress = aggregateBefore + (it.progress || 0);
+  const totalDuration = it.duration || videos.reduce((s, v) => s + (v.duration ?? 0), 0);
   const progressPct =
-    it.duration && it.duration > 0
-      ? Math.min(100, Math.round((it.progress / it.duration) * 100))
+    totalDuration && totalDuration > 0
+      ? Math.min(100, Math.round((aggregateProgress / totalDuration) * 100))
       : 0;
 
   return (
@@ -148,16 +241,25 @@ export default function InstructionalDetail() {
 
       {/* Player */}
       <div className="rounded-lg overflow-hidden border border-card-border bg-black mb-6">
-        <video
-          ref={videoRef}
-          src={apiUrl(`/api/stream/${it.id}`)}
-          controls
-          className="w-full aspect-video"
-          onTimeUpdate={onTimeUpdate}
-          onEnded={onEnded}
-          poster={it.thumbnail ? apiUrl(`/api/thumb/${it.id}?v=${it.updatedAt}`) : undefined}
-          data-testid="video-player"
-        />
+        {currentVideo ? (
+          <video
+            ref={videoRef}
+            key={currentVideo.id}
+            src={apiUrl(`/api/videos/${currentVideo.id}/stream`)}
+            controls
+            autoPlay={autoAdvance}
+            className="w-full aspect-video"
+            onTimeUpdate={onTimeUpdate}
+            onLoadedMetadata={onLoadedMetadata}
+            onEnded={onEnded}
+            poster={it.thumbnail ? apiUrl(`/api/thumb/${it.id}?v=${it.updatedAt}`) : undefined}
+            data-testid="video-player"
+          />
+        ) : (
+          <div className="w-full aspect-video flex items-center justify-center text-muted-foreground text-sm">
+            No playable video parts.
+          </div>
+        )}
       </div>
 
       {/* Header */}
@@ -169,7 +271,13 @@ export default function InstructionalDetail() {
             )}
             {!it.available && (
               <span className="inline-flex items-center gap-1 text-amber-500 text-xs">
-                <Clock className="size-3" /> File missing on disk
+                <Clock className="size-3" /> Folder missing on disk
+              </span>
+            )}
+            {videos.length > 1 && (
+              <span className="inline-flex items-center gap-1 text-muted-foreground text-xs">
+                <ListVideo className="size-3" />
+                Part {currentIndex + 1} of {videos.length}
               </span>
             )}
           </div>
@@ -282,6 +390,54 @@ export default function InstructionalDetail() {
               </p>
             </div>
           )}
+
+          {/* Parts list */}
+          {videos.length > 0 && (
+            <div>
+              <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2 font-mono">
+                Parts
+              </h3>
+              <div className="rounded-md border border-card-border overflow-hidden">
+                {videos.map((v, i) => {
+                  const active = v.id === currentVideo?.id;
+                  return (
+                    <button
+                      key={v.id}
+                      onClick={() => switchPart(v.id)}
+                      data-testid={`button-part-${v.id}`}
+                      className={`w-full flex items-center gap-3 px-3 py-2 text-left text-sm border-b border-card-border last:border-0 transition-colors ${
+                        active
+                          ? "bg-primary/10 text-foreground"
+                          : "hover:bg-muted/60"
+                      }`}
+                    >
+                      <Play
+                        className={`size-4 shrink-0 ${
+                          active ? "text-primary" : "text-muted-foreground"
+                        }`}
+                        fill="currentColor"
+                      />
+                      <span className="font-mono text-xs text-muted-foreground w-6 shrink-0">
+                        {String(i + 1).padStart(2, "0")}
+                      </span>
+                      <span className="flex-1 truncate font-mono text-xs">
+                        {v.fileName}
+                      </span>
+                      {!v.available && (
+                        <span className="text-[10px] text-amber-500">missing</span>
+                      )}
+                      {v.duration ? (
+                        <span className="text-[10px] text-muted-foreground font-mono">
+                          {formatDuration(v.duration)}
+                        </span>
+                      ) : null}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           {it.tags.length > 0 && (
             <div>
               <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2 font-mono">
@@ -305,16 +461,25 @@ export default function InstructionalDetail() {
         <div className="space-y-2 text-sm">
           <MetaRow icon={Clock} label="Duration" value={formatDuration(it.duration)} />
           <MetaRow
+            icon={ListVideo}
+            label="Parts"
+            value={String(videos.length)}
+          />
+          <MetaRow
             icon={HardDrive}
-            label="File size"
-            value={formatBytes(it.fileSize)}
+            label="Size"
+            value={formatBytes(
+              videos.reduce((s, v) => s + (v.fileSize ?? 0), 0)
+            )}
           />
           <MetaRow
             icon={Calendar}
             label="Added"
             value={formatRelative(it.createdAt)}
           />
-          <MetaRow icon={TagIcon} label="File" value={it.fileName} mono />
+          {it.folderPath && (
+            <MetaRow icon={Folder} label="Folder" value={it.folderPath} mono />
+          )}
         </div>
       </div>
 
@@ -365,9 +530,10 @@ function EditDialog({
     positionId: "",
     techniqueCategoryId: "",
     notes: "",
-    filePath: "",
     rating: 0,
   });
+  // Video parts editor state: each entry is a raw file path/URL string.
+  const [parts, setParts] = useState<string[]>([]);
   const [selectedTags, setSelectedTags] = useState<number[]>([]);
   const [newTag, setNewTag] = useState("");
 
@@ -403,9 +569,11 @@ function EditDialog({
           ? String(instructional.techniqueCategoryId)
           : "",
         notes: instructional.notes || "",
-        filePath: instructional.filePath || "",
         rating: instructional.rating || 0,
       });
+      setParts(
+        (instructional.videos ?? []).map((v: any) => v.filePath).filter(Boolean)
+      );
       setSelectedTags(instructional.tags?.map((t: any) => t.id) || []);
       setNewTag("");
     }
@@ -421,6 +589,15 @@ function EditDialog({
 
   const saveMutation = useMutation({
     mutationFn: async () => {
+      // Normalize parts: trim, drop empties, derive a fileName from the path's
+      // basename when none is obvious.
+      const cleaned = parts
+        .map((p) => p.trim())
+        .filter(Boolean)
+        .map((p, i) => {
+          const seg = p.replace(/\\/g, "/").split("/").pop() || p;
+          return { filePath: p, fileName: seg, sortOrder: i, available: true };
+        });
       const payload: any = {
         title: form.title,
         description: form.description || null,
@@ -430,9 +607,9 @@ function EditDialog({
           ? Number(form.techniqueCategoryId)
           : null,
         notes: form.notes || null,
-        filePath: form.filePath,
         rating: form.rating,
         tagIds: selectedTags,
+        videos: cleaned,
       };
       return apiRequest("PATCH", `/api/instructionals/${instructional.id}`, payload);
     },
@@ -556,6 +733,48 @@ function EditDialog({
             />
           </div>
 
+          {/* Video parts editor */}
+          <div className="space-y-1.5">
+            <Label>Video parts (file path or URL)</Label>
+            <div className="space-y-2">
+              {parts.map((p, i) => (
+                <div key={i} className="flex gap-2">
+                  <Input
+                    value={p}
+                    onChange={(e) =>
+                      setParts((arr) =>
+                        arr.map((x, j) => (j === i ? e.target.value : x))
+                      )
+                    }
+                    className="font-mono text-xs"
+                    placeholder="Instructor/Title/part1.mkv or https://…"
+                    data-testid={`input-part-${i}`}
+                  />
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    onClick={() =>
+                      setParts((arr) => arr.filter((_, j) => j !== i))
+                    }
+                    aria-label="Remove part"
+                    data-testid={`button-remove-part-${i}`}
+                  >
+                    <X className="size-4" />
+                  </Button>
+                </div>
+              ))}
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setParts((arr) => [...arr, ""])}
+                data-testid="button-add-part"
+              >
+                <Plus className="size-4" />
+                Add part
+              </Button>
+            </div>
+          </div>
+
           {/* Tags */}
           <div className="space-y-1.5">
             <Label>Tags</Label>
@@ -634,16 +853,6 @@ function EditDialog({
                 <Plus className="size-4" />
               </Button>
             </div>
-          </div>
-
-          <div className="space-y-1.5">
-            <Label htmlFor="f-path">File path / URL</Label>
-            <Input
-              id="f-path"
-              value={form.filePath}
-              onChange={(e) => set("filePath", e.target.value)}
-              className="font-mono text-xs"
-            />
           </div>
         </div>
 

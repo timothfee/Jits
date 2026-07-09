@@ -70,7 +70,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     const parsed = insertInstructionalSchema.safeParse(req.body);
     if (!parsed.success)
       return res.status(400).json({ message: "Invalid", errors: parsed.error.flatten() });
-    const created = storage.createInstructional(parsed.data);
+    // Optional video parts. Accept either a `videos` array or (for legacy
+    // clients) a single `filePath`.
+    const videos = Array.isArray(req.body.videos) ? req.body.videos : undefined;
+    const created = storage.createInstructional(parsed.data, videos);
     if (Array.isArray(req.body.tagIds)) {
       storage.setInstructionalTags(created.id, req.body.tagIds.map(Number));
     }
@@ -82,7 +85,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     const parsed = updateInstructionalSchema.safeParse(req.body);
     if (!parsed.success)
       return res.status(400).json({ message: "Invalid", errors: parsed.error.flatten() });
-    const updated = storage.updateInstructional(id, parsed.data);
+    // Pass `videos` through only when explicitly provided as an array.
+    const payload: any = { ...parsed.data };
+    if (Array.isArray(req.body.videos)) payload.videos = req.body.videos;
+    const updated = storage.updateInstructional(id, payload);
     if (!updated) return res.status(404).json({ message: "Not found" });
     if (Array.isArray(req.body.tagIds)) {
       storage.setInstructionalTags(id, req.body.tagIds.map(Number));
@@ -99,7 +105,17 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     const id = Number(req.params.id);
     const progress = Number(req.body.progress) || 0;
     const watched = Boolean(req.body.watched);
-    const updated = storage.updateProgress(id, progress, watched);
+    // progressVideoId is optional; if provided it must belong to this
+    // instructional so multi-part resume lands on a real part.
+    let progressVideoId: number | null | undefined = undefined;
+    if (req.body.progressVideoId !== undefined && req.body.progressVideoId !== null) {
+      const vid = Number(req.body.progressVideoId);
+      const part = storage.getVideo(vid);
+      if (part && part.instructionalId === id) progressVideoId = vid;
+    } else {
+      progressVideoId = null;
+    }
+    const updated = storage.updateProgress(id, progress, watched, progressVideoId);
     res.json(updated);
   });
 
@@ -158,19 +174,24 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
 
   // ===== Video streaming (range support) =====
-  app.get("/api/stream/:id", (req, res) => {
-    const id = Number(req.params.id);
-    const item = storage.getInstructional(id);
-    if (!item) return res.status(404).json({ message: "Not found" });
+  // Streams a single video part by its id (not the instructional id). The
+  // frontend resolves which part to play from the instructional's videos[] and
+  // points the <video> at /api/videos/:videoId/stream.
+  app.get("/api/videos/:videoId/stream", (req, res) => {
+    const videoId = Number(req.params.videoId);
+    const part = storage.getVideo(videoId);
+    if (!part) return res.status(404).json({ message: "Not found" });
+    if (!part.available)
+      return res.status(410).json({ message: "File no longer available" });
 
     // Remote URL → redirect, browser video element follows and streams directly
-    if (/^https?:\/\//i.test(item.filePath)) {
-      return res.redirect(item.filePath);
+    if (/^https?:\/\//i.test(part.filePath)) {
+      return res.redirect(part.filePath);
     }
 
     let resolved: string;
     try {
-      resolved = resolveFilePath(item.filePath);
+      resolved = resolveFilePath(part.filePath);
     } catch {
       return res.status(400).json({ message: "Invalid path" });
     }
@@ -182,12 +203,12 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     const fileSize = stat.size;
     // Derive the Content-Type from the actual file extension so non-mp4
     // containers (mkv, webm, mov, ...) aren't mislabeled.
-    const contentType = videoMimeType(item.filePath);
+    const contentType = videoMimeType(part.filePath);
     const range = req.headers.range;
     if (range) {
-      const parts = range.replace(/bytes=/, "").split("-");
-      const start = parseInt(parts[0], 10);
-      const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+      const rangeParts = range.replace(/bytes=/, "").split("-");
+      const start = parseInt(rangeParts[0], 10);
+      const end = rangeParts[1] ? parseInt(rangeParts[1], 10) : fileSize - 1;
       const chunkSize = end - start + 1;
       const stream = fs.createReadStream(resolved, { start, end });
       res.writeHead(206, {
