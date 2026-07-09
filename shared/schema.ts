@@ -8,15 +8,20 @@ export const instructors = sqliteTable("instructors", {
   name: text("name").notNull(),
   bio: text("bio"),
   academy: text("academy"),
-  belt: text("belt"), // e.g. "black", "coral"
+  belt: text("belt"),
   createdAt: integer("created_at").notNull(),
 });
 
 // ---------- Positions (controlled vocabulary) ----------
+// Each position belongs to a technique category (e.g. Closed Guard → Guard,
+// Side Control → Control). The FK is nullable for legacy rows and "Other" catch-all
+// positions. The UI uses this to show only relevant positions when a technique
+// is selected, preventing nonsense combos like Passing + K Guard.
 export const positions = sqliteTable("positions", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   name: text("name").notNull(),
-  group: text("group").notNull().default("Other"), // Guard, Control, Top, Bottom, Neutral, Submission
+  group: text("group").notNull().default("Other"),
+  techniqueCategoryId: integer("technique_category_id"), // FK → technique_categories.id
   sortOrder: integer("sort_order").notNull().default(0),
   createdAt: integer("created_at").notNull(),
 });
@@ -26,7 +31,7 @@ export const techniqueCategories = sqliteTable("technique_categories", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   name: text("name").notNull(),
   slug: text("slug").notNull().unique(),
-  color: text("color").notNull().default("#64748b"), // hex used for badge tinting
+  color: text("color").notNull().default("#64748b"),
   sortOrder: integer("sort_order").notNull().default(0),
   createdAt: integer("created_at").notNull(),
 });
@@ -38,45 +43,54 @@ export const tags = sqliteTable("tags", {
   createdAt: integer("created_at").notNull(),
 });
 
-// ---------- Instructionals (a folder / volume entry) ----------
-// An instructional represents a TITLE FOLDER (e.g. "Outside Funk"), not a
-// single file. The video file(s) inside it are stored in `instructionalVideos`.
+// ---------- Instructionals ----------
 export const instructionals = sqliteTable("instructionals", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   title: text("title").notNull(),
   description: text("description"),
   instructorId: integer("instructor_id"),
   positionId: integer("position_id"),
+  // Legacy single-value technique category — kept for backwards compat with
+  // existing data; new writes use the M2M junction table instead.
   techniqueCategoryId: integer("technique_category_id"),
-  // Relative path of the title folder within MEDIA_DIR (null for manually-added
-  // / remote entries with no real folder). Used as the scan grouping key.
+  // Gi vs No-Gi classification
+  ruleset: text("ruleset").default("unknown"), // "gi" | "nogi" | "both" | "unknown"
   folderPath: text("folder_path"),
-  // Denormalized for fast homepage rendering: first part's thumbnail + sum of
-  // part durations. Kept in sync by syncInstructionalRollup().
-  duration: integer("duration"), // seconds (sum of parts)
-  thumbnail: text("thumbnail"), // relative filename in THUMBNAIL_DIR
+  duration: integer("duration"),
+  thumbnail: text("thumbnail"),
   notes: text("notes"),
-  rating: integer("rating").default(0), // 0-5
+  rating: integer("rating").default(0),
   watched: integer("watched", { mode: "boolean" }).notNull().default(false),
-  progress: integer("progress").notNull().default(0), // seconds watched (last played part)
-  // Which video part the saved progress belongs to (so multi-part resume lands
-  // on the right file). Null = start from the first part.
+  progress: integer("progress").notNull().default(0),
   progressVideoId: integer("progress_video_id"),
-  available: integer("available", { mode: "boolean" }).notNull().default(true), // folder still on disk
+  available: integer("available", { mode: "boolean" }).notNull().default(true),
   createdAt: integer("created_at").notNull(),
   updatedAt: integer("updated_at").notNull(),
 });
 
-// ---------- Instructional videos (the parts/files inside a folder) ----------
+// ---------- Join: instructionals <-> technique_categories (M2M) ----------
+export const instructionalTechniqueCategories = sqliteTable(
+  "instructional_technique_categories",
+  {
+    instructionalId: integer("instructional_id")
+      .notNull()
+      .references(() => instructionals.id, { onDelete: "cascade" }),
+    techniqueCategoryId: integer("technique_category_id")
+      .notNull()
+      .references(() => techniqueCategories.id, { onDelete: "cascade" }),
+  }
+);
+
+// ---------- Instructional videos ----------
 export const instructionalVideos = sqliteTable("instructional_videos", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   instructionalId: integer("instructional_id")
     .notNull()
     .references(() => instructionals.id, { onDelete: "cascade" }),
-  filePath: text("file_path").notNull(), // relative path within MEDIA_DIR, or an http(s) URL
+  filePath: text("file_path").notNull(),
   fileName: text("file_name").notNull(),
-  fileSize: integer("file_size"), // bytes
-  duration: integer("duration"), // seconds (this part only)
+  fileSize: integer("file_size"),
+  duration: integer("duration"),
   sortOrder: integer("sort_order").notNull().default(0),
   available: integer("available", { mode: "boolean" }).notNull().default(true),
   createdAt: integer("created_at").notNull(),
@@ -120,7 +134,6 @@ export const insertInstructionalVideoSchema = createInsertSchema(instructionalVi
   updatedAt: true,
 });
 
-// Custom update schema: everything optional except nothing required
 export const updateInstructionalSchema = insertInstructionalSchema.partial();
 
 // ---------- Types ----------
@@ -143,12 +156,17 @@ export type InstructionalVideo = typeof instructionalVideos.$inferSelect;
 export type InsertInstructionalVideo = z.infer<typeof insertInstructionalVideoSchema>;
 
 export type InstructionalTag = typeof instructionalTags.$inferSelect;
+export type InstructionalTechniqueCategory = typeof instructionalTechniqueCategories.$inferSelect;
 
-// ---------- Rich types (instructional with relations) ----------
+export const RULESET_OPTIONS = ["gi", "nogi", "both", "unknown"] as const;
+export type Ruleset = typeof RULESET_OPTIONS[number];
+
+// ---------- Rich types ----------
 export type InstructionalWithRelations = Instructional & {
   instructor?: Instructor | null;
   position?: Position | null;
-  techniqueCategory?: TechniqueCategory | null;
+  // Multi-technique: replaces single techniqueCategory
+  techniqueCategories: TechniqueCategory[];
   tags: Tag[];
   videos: InstructionalVideo[];
 };
@@ -168,9 +186,6 @@ export const VIDEO_EXTENSIONS = [
   ".mpeg",
 ];
 
-// Map a video file extension to a MIME type for streaming. Browsers are picky
-// about the Content-Type on <video> sources — a wrong type can break playback
-// or seeking. Fallback to application/octet-stream so the route still streams.
 export const VIDEO_MIME_TYPES: Record<string, string> = {
   ".mp4": "video/mp4",
   ".m4v": "video/mp4",

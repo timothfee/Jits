@@ -5,6 +5,7 @@ import {
   tags,
   instructionals,
   instructionalTags,
+  instructionalTechniqueCategories,
   instructionalVideos,
   type Instructional,
   type InstructionalWithRelations,
@@ -32,7 +33,6 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 
 const DB_PATH = process.env.DB_PATH || "./data/data.db";
-// Ensure the directory exists
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 
 const sqlite = new Database(DB_PATH);
@@ -40,21 +40,23 @@ sqlite.pragma("journal_mode = WAL");
 sqlite.pragma("foreign_keys = ON");
 
 export const db = drizzle(sqlite, {
-  schema: { instructors, positions, techniqueCategories, tags, instructionals, instructionalTags, instructionalVideos },
+  schema: {
+    instructors,
+    positions,
+    techniqueCategories,
+    tags,
+    instructionals,
+    instructionalTags,
+    instructionalTechniqueCategories,
+    instructionalVideos,
+  },
 });
 
-// Media directory (mounted volume in Docker)
 export const MEDIA_DIR = process.env.MEDIA_DIR || path.resolve(process.cwd(), "media");
-
-// Thumbnails live in the writable data volume (NOT read-only /media) so they
-// persist across container restarts. Controlled by THUMBNAIL_DIR, defaulting to
-// a `thumbnails` folder next to the SQLite database.
 export const THUMBNAIL_DIR =
   process.env.THUMBNAIL_DIR || path.join(path.dirname(path.resolve(DB_PATH)), "thumbnails");
 fs.mkdirSync(THUMBNAIL_DIR, { recursive: true });
 
-// Whether ffmpeg/ffprobe are available. If not, thumbnail generation is a no-op
-// (the gradient fallback is used) instead of an error.
 let ffmpegAvailable: boolean | null = null;
 async function checkFfmpeg(): Promise<boolean> {
   if (ffmpegAvailable !== null) return ffmpegAvailable;
@@ -69,8 +71,6 @@ async function checkFfmpeg(): Promise<boolean> {
   return ffmpegAvailable;
 }
 
-// Resolve the on-disk absolute path for an instructional's source video.
-// Returns null for remote URLs (handled separately) or invalid/traversing paths.
 function resolveLocalSource(filePath: string): string | null {
   if (/^https?:\/\//i.test(filePath)) return null;
   const resolved = path.resolve(MEDIA_DIR, filePath);
@@ -79,7 +79,6 @@ function resolveLocalSource(filePath: string): string | null {
   return resolved;
 }
 
-// Probe a video's duration (seconds) with ffprobe. Returns null on failure.
 async function probeDuration(source: string): Promise<number | null> {
   const isRemote = /^https?:\/\//i.test(source);
   try {
@@ -99,17 +98,11 @@ async function probeDuration(source: string): Promise<number | null> {
   }
 }
 
-// Generate a single thumbnail for an instructional. Resolves the source
-// (local file or remote URL), seeks ~10% in (clamped), and writes a JPEG into
-// THUMBNAIL_DIR. Stores the relative filename in the `thumbnail` column and
-// updates `duration` if missing. Returns the stored filename or null on failure.
 async function generateThumbnail(id: number): Promise<string | null> {
   if (!(await checkFfmpeg())) return null;
   const item = db.select().from(instructionals).where(eq(instructionals.id, id)).get();
   if (!item) return null;
 
-  // Use the first AVAILABLE video part as the source frame (skip parts whose
-  // file is missing on disk).
   const part = db
     .select()
     .from(instructionalVideos)
@@ -118,20 +111,14 @@ async function generateThumbnail(id: number): Promise<string | null> {
     .get();
   if (!part) return null;
 
-  // Remote URL or local path — both are valid ffmpeg inputs.
   const local = resolveLocalSource(part.filePath);
   const isRemote = /^https?:\/\//i.test(part.filePath);
-  // Only fetch arbitrary remote URLs for thumbnailing when explicitly allowed
-  // (demo preview) — avoids server-side fetching of user-entered URLs in
-  // normal Docker installs.
   const allowRemote =
     process.env.DEMO_SEED === "true" || process.env.ALLOW_REMOTE_THUMBNAILS === "true";
   if (isRemote && !allowRemote) return null;
   const source = local ?? (isRemote ? part.filePath : null);
   if (!source) return null;
 
-  // Probe this part's duration if missing, then keep the instructional's
-  // denormalized duration in sync.
   let partDuration = part.duration ?? null;
   if (!partDuration) {
     partDuration = await probeDuration(source);
@@ -144,15 +131,11 @@ async function generateThumbnail(id: number): Promise<string | null> {
   }
   syncInstructionalRollup(id);
 
-  // Seek ~10% in, clamped to [1, 30]s so short clips and long films both land sensibly.
   const seek = partDuration ? Math.max(1, Math.min(partDuration * 0.1, 30)) : 5;
   const outName = `instructional-${id}.jpg`;
   const outPath = path.join(THUMBNAIL_DIR, outName);
 
   try {
-    // `-ss` before `-i` is a fast seek. For remote URLs send a browser-like
-    // User-Agent (some hosts 403 ffmpeg's default) and cap socket read time so a
-    // dead host can't hang generation.
     const inputArgs = /^https?:\/\//i.test(source)
       ? ["-user_agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36", "-timeout", "15000000", "-i", source]
       : ["-i", source];
@@ -167,8 +150,7 @@ async function generateThumbnail(id: number): Promise<string | null> {
       outPath,
     ], { timeout: 30000 });
     if (!fs.existsSync(outPath) || fs.statSync(outPath).size === 0) return null;
-  } catch (err) {
-    // Clean up a partial/empty file if ffmpeg left one.
+  } catch {
     try { if (fs.existsSync(outPath)) fs.unlinkSync(outPath); } catch {}
     return null;
   }
@@ -181,9 +163,7 @@ async function generateThumbnail(id: number): Promise<string | null> {
   return outName;
 }
 
-// ---------- Schema bootstrap (fresh installs / new Docker volumes) ----------
-// Creates tables if they don't exist so the app works without drizzle-kit in the
-// runtime image. Keep these in sync with shared/schema.ts.
+// ---------- Schema bootstrap ----------
 function initDb() {
   sqlite.exec(`
     CREATE TABLE IF NOT EXISTS instructors (
@@ -198,6 +178,7 @@ function initDb() {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,
       "group" TEXT NOT NULL DEFAULT 'Other',
+      technique_category_id INTEGER,
       sort_order INTEGER NOT NULL DEFAULT 0,
       created_at INTEGER NOT NULL
     );
@@ -221,6 +202,7 @@ function initDb() {
       instructor_id INTEGER,
       position_id INTEGER,
       technique_category_id INTEGER,
+      ruleset TEXT DEFAULT 'unknown',
       folder_path TEXT,
       duration INTEGER,
       thumbnail TEXT,
@@ -235,6 +217,13 @@ function initDb() {
       FOREIGN KEY (instructor_id) REFERENCES instructors(id) ON DELETE CASCADE,
       FOREIGN KEY (position_id) REFERENCES positions(id) ON DELETE SET NULL,
       FOREIGN KEY (technique_category_id) REFERENCES technique_categories(id) ON DELETE SET NULL
+    );
+    CREATE TABLE IF NOT EXISTS instructional_technique_categories (
+      instructional_id INTEGER NOT NULL,
+      technique_category_id INTEGER NOT NULL,
+      PRIMARY KEY (instructional_id, technique_category_id),
+      FOREIGN KEY (instructional_id) REFERENCES instructionals(id) ON DELETE CASCADE,
+      FOREIGN KEY (technique_category_id) REFERENCES technique_categories(id) ON DELETE CASCADE
     );
     CREATE TABLE IF NOT EXISTS instructional_tags (
       instructional_id INTEGER NOT NULL,
@@ -258,27 +247,52 @@ function initDb() {
     );
     CREATE INDEX IF NOT EXISTS idx_instructional_videos_instr ON instructional_videos(instructional_id);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_instructional_videos_path ON instructional_videos(file_path);
+    CREATE INDEX IF NOT EXISTS idx_itc_instructional ON instructional_technique_categories(instructional_id);
+    CREATE INDEX IF NOT EXISTS idx_itc_category ON instructional_technique_categories(technique_category_id);
   `);
 }
 
-// ---------- Migration for existing volumes (pre-folder-schema) ----------
-// Older installs stored one row per file on `instructionals` (file_path/file_name/
-// file_size columns). This migrates them to the folder+part model: each old row
-// becomes one instructional with a single video part. SQLite keeps the now-unused
-// columns around harmlessly. Safe to run repeatedly (idempotent).
+// ---------- Migration (existing volumes) ----------
 function hasColumn(table: string, col: string): boolean {
   const rows = sqlite.prepare(`PRAGMA table_info(${table})`).all() as any[];
   return rows.some((r) => r.name === col);
 }
+
 function migrate() {
-  // Ensure new instructionals columns exist on older databases.
+  // Legacy instructionals columns
   if (!hasColumn("instructionals", "folder_path")) {
     sqlite.exec(`ALTER TABLE instructionals ADD COLUMN folder_path TEXT;`);
   }
   if (!hasColumn("instructionals", "progress_video_id")) {
     sqlite.exec(`ALTER TABLE instructionals ADD COLUMN progress_video_id INTEGER;`);
   }
-  // instructional_videos is created by initDb(); confirm it exists here too.
+  // New: ruleset
+  if (!hasColumn("instructionals", "ruleset")) {
+    sqlite.exec(`ALTER TABLE instructionals ADD COLUMN ruleset TEXT DEFAULT 'unknown';`);
+  }
+  // New: technique_category_id on positions
+  if (!hasColumn("positions", "technique_category_id")) {
+    sqlite.exec(`ALTER TABLE positions ADD COLUMN technique_category_id INTEGER;`);
+  }
+  // New: M2M junction table
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS instructional_technique_categories (
+      instructional_id INTEGER NOT NULL,
+      technique_category_id INTEGER NOT NULL,
+      PRIMARY KEY (instructional_id, technique_category_id),
+      FOREIGN KEY (instructional_id) REFERENCES instructionals(id) ON DELETE CASCADE,
+      FOREIGN KEY (technique_category_id) REFERENCES technique_categories(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_itc_instructional ON instructional_technique_categories(instructional_id);
+    CREATE INDEX IF NOT EXISTS idx_itc_category ON instructional_technique_categories(technique_category_id);
+  `);
+  // Backfill junction table from legacy single technique_category_id values
+  sqlite.exec(`
+    INSERT OR IGNORE INTO instructional_technique_categories (instructional_id, technique_category_id)
+    SELECT id, technique_category_id FROM instructionals
+    WHERE technique_category_id IS NOT NULL;
+  `);
+  // instructional_videos
   sqlite.exec(`
     CREATE TABLE IF NOT EXISTS instructional_videos (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -295,7 +309,7 @@ function migrate() {
     );
     CREATE INDEX IF NOT EXISTS idx_instructional_videos_instr ON instructional_videos(instructional_id);
   `);
-  // Only attempt the file_path → part migration if the legacy column is present.
+  // Legacy file_path → video part migration
   if (hasColumn("instructionals", "file_path")) {
     const legacy = sqlite.prepare(
       `SELECT id, file_path, file_name, file_size, duration FROM instructionals WHERE file_path IS NOT NULL`
@@ -307,7 +321,6 @@ function migrate() {
     const setFolder = sqlite.prepare(`UPDATE instructionals SET folder_path = ? WHERE id = ? AND folder_path IS NULL`);
     for (const row of legacy) {
       ins.run(row.id, row.file_path, row.file_name, row.file_size, row.duration, ts, ts);
-      // Derive a folder_path from the legacy file path so re-scans match this row.
       const norm = row.file_path.replace(/\\/g, "/");
       const segs = norm.split("/").filter(Boolean);
       let folder: string | null = null;
@@ -318,14 +331,12 @@ function migrate() {
     }
   }
 }
+
 initDb();
 migrate();
 normalizeLibrary();
 
-// Startup diagnostics for the media directory: log the resolved path, whether
-// it exists and is readable, and the uid/gid the container is running as. This
-// makes bind-mount / permission problems (very common on NAS setups) visible
-// in the container logs immediately, instead of as a silent empty scan.
+// Startup diagnostics
 (() => {
   const dir = MEDIA_DIR;
   const uid = typeof process.getuid === "function" ? process.getuid() : "?";
@@ -343,22 +354,16 @@ normalizeLibrary();
   const status = !exists ? "MISSING" : readable ? "readable" : "NOT READABLE (permission denied)";
   console.log(`[storage] MEDIA_DIR=${dir} | uid=${uid} gid=${gid} | ${status}`);
   if (!exists) {
-    console.log(`[storage] Bind-mount your instructionals folder to /media, e.g. /volume1/Media/Instructionals:/media`);
+    console.log(`[storage] Bind-mount your instructionals folder to /media`);
   } else if (!readable) {
-    console.log(`[storage] Grant read+execute on the host folder to uid ${uid}/gid ${gid}, or run the container as a user that can read it.`);
+    console.log(`[storage] Grant read+execute on the host folder to uid ${uid}/gid ${gid}`);
   }
 })();
 
-// ---------- Helpers ----------
 function now() {
   return Date.now();
 }
 
-// One-time startup normalization (also re-run at the top of scanLibrary):
-// merge any duplicate instructionals sharing a folderPath into the canonical
-// (lowest-id) one — reparent their video parts, then delete the empties — and
-// recompute denormalized rollup fields for anything with parts. This keeps the
-// homepage correct on upgrade even before the user clicks Scan.
 function normalizeLibrary() {
   const existing = db.select().from(instructionals).all();
   const seen = new Map<string, Instructional>();
@@ -378,8 +383,6 @@ function normalizeLibrary() {
       db.delete(instructionals).where(eq(instructionals.id, e.id)).run();
     }
   }
-  // Re-rollup anything that has parts so duration/availability are correct after
-  // a legacy migration or part reparenting.
   const withParts = db
     .select({ id: instructionalVideos.instructionalId })
     .from(instructionalVideos)
@@ -388,6 +391,7 @@ function normalizeLibrary() {
   for (const r of withParts) syncInstructionalRollup(r.id);
 }
 
+// Bulk-attach tags to a set of instructional rows
 function attachTags(rows: Instructional[]): (Instructional & { tags: Tag[] })[] {
   if (rows.length === 0) return [];
   const ids = rows.map((r) => r.id);
@@ -407,10 +411,47 @@ function attachTags(rows: Instructional[]): (Instructional & { tags: Tag[] })[] 
     arr.push({ id: t.id, name: t.name, createdAt: 0 });
     byInst.set(t.instructionalId, arr);
   }
-  return rows.map((r) => ({
-    ...r,
-    tags: byInst.get(r.id) || [],
-  }));
+  return rows.map((r) => ({ ...r, tags: byInst.get(r.id) || [] }));
+}
+
+// Bulk-attach technique categories (M2M) to a set of instructional rows
+function attachTechniqueCategories(
+  rows: Instructional[]
+): Map<number, TechniqueCategory[]> {
+  const map = new Map<number, TechniqueCategory[]>();
+  if (rows.length === 0) return map;
+  const ids = rows.map((r) => r.id);
+  const catRows = db
+    .select({
+      instructionalId: instructionalTechniqueCategories.instructionalId,
+      id: techniqueCategories.id,
+      name: techniqueCategories.name,
+      slug: techniqueCategories.slug,
+      color: techniqueCategories.color,
+      sortOrder: techniqueCategories.sortOrder,
+      createdAt: techniqueCategories.createdAt,
+    })
+    .from(instructionalTechniqueCategories)
+    .innerJoin(
+      techniqueCategories,
+      eq(techniqueCategories.id, instructionalTechniqueCategories.techniqueCategoryId)
+    )
+    .where(inArray(instructionalTechniqueCategories.instructionalId, ids))
+    .orderBy(asc(techniqueCategories.sortOrder))
+    .all();
+  for (const c of catRows) {
+    const arr = map.get(c.instructionalId) || [];
+    arr.push({
+      id: c.id,
+      name: c.name,
+      slug: c.slug,
+      color: c.color,
+      sortOrder: c.sortOrder,
+      createdAt: c.createdAt,
+    });
+    map.set(c.instructionalId, arr);
+  }
+  return map;
 }
 
 function attachVideos(rows: Instructional[]): Map<number, InstructionalVideo[]> {
@@ -434,25 +475,19 @@ function attachVideos(rows: Instructional[]): Map<number, InstructionalVideo[]> 
 function enrich(
   rows: Instructional[],
   instructorMap: Map<number, Instructor>,
-  positionMap: Map<number, Position>,
-  categoryMap: Map<number, TechniqueCategory>
+  positionMap: Map<number, Position>
 ): InstructionalWithRelations[] {
   const videoMap = attachVideos(rows);
+  const techCatMap = attachTechniqueCategories(rows);
   return attachTags(rows).map((r) => ({
     ...r,
     instructor: r.instructorId ? instructorMap.get(r.instructorId) ?? null : null,
     position: r.positionId ? positionMap.get(r.positionId) ?? null : null,
-    techniqueCategory: r.techniqueCategoryId
-      ? categoryMap.get(r.techniqueCategoryId) ?? null
-      : null,
+    techniqueCategories: techCatMap.get(r.id) || [],
     videos: videoMap.get(r.id) || [],
   }));
 }
 
-// Recompute denormalized rollup fields on an instructional from its parts:
-//   duration = sum of part durations
-//   available = any part available
-// (thumbnail is managed by generateThumbnail; this leaves it untouched.)
 function syncInstructionalRollup(id: number) {
   const parts = db
     .select()
@@ -472,30 +507,21 @@ function loadLookups() {
   for (const i of db.select().from(instructors).all()) instructorMap.set(i.id, i);
   const positionMap = new Map<number, Position>();
   for (const p of db.select().from(positions).all()) positionMap.set(p.id, p);
-  const categoryMap = new Map<number, TechniqueCategory>();
-  for (const c of db.select().from(techniqueCategories).all()) categoryMap.set(c.id, c);
-  return { instructorMap, positionMap, categoryMap };
+  return { instructorMap, positionMap };
 }
 
-// Derive the folder grouping key, instructor, and title from a video's path
-// relative to MEDIA_DIR.
-//   <Instructor>/<Title>/<file>.mkv (and deeper) -> folderPath = Instructor/Title,
-//     instructor = Instructor, title = Title
-//   Shallower layouts (<=2 segments) don't group: folderPath = the file path
-//   itself (unique per file), title = filename, instructor = first segment if any.
 function deriveFolderFromPath(rel: string): {
   folderPath: string;
   instructor: string | null;
   title: string;
 } {
-  const norm = rel.replace(/\\/g, "/"); // tolerate Windows-style separators
+  const norm = rel.replace(/\\/g, "/");
   const parts = norm.split("/").filter(Boolean);
   const file = parts[parts.length - 1] || rel;
   const titleFromFile = path.basename(file, path.extname(file));
   if (parts.length >= 3) {
     return { folderPath: `${parts[0]}/${parts[1]}`, instructor: parts[0], title: parts[1] };
   }
-  // 1-2 segments: per-file instructional (no folder grouping).
   return {
     folderPath: norm,
     instructor: parts.length === 2 ? parts[0] : null,
@@ -503,24 +529,23 @@ function deriveFolderFromPath(rel: string): {
   };
 }
 
-// Find an instructor by exact name, creating one if it doesn't exist yet.
 function getOrCreateInstructor(name: string): Instructor {
   const existing = db.select().from(instructors).where(eq(instructors.name, name)).get();
   if (existing) return existing;
   return db.insert(instructors).values({ name, createdAt: now() }).returning().get();
 }
 
-// A video part as supplied by the API/frontend (no instructionalId — the
-// storage layer injects it from the parent instructional). Used by create/update.
 export type VideoPartInput = Omit<InsertInstructionalVideo, "instructionalId">;
 
 // ---------- Filters ----------
 export interface InstructionalFilter {
   q?: string;
   instructorId?: number;
-  techniqueCategoryId?: number;
+  // Multi-technique: array of category IDs (OR match — any of these)
+  techniqueCategoryIds?: number[];
   positionId?: number;
   tagId?: number;
+  ruleset?: string;
   watched?: boolean;
   sort?: "recent" | "title" | "rating" | "progress";
 }
@@ -533,19 +558,21 @@ export const storage = {
     if (filter.q) {
       const term = `%${filter.q}%`;
       conditions.push(
-          or(
-            like(instructionals.title, term),
-            like(instructionals.description, term),
-            like(instructionals.folderPath, term)
-          )!
-        );
+        or(
+          like(instructionals.title, term),
+          like(instructionals.description, term),
+          like(instructionals.folderPath, term)
+        )!
+      );
     }
-    if (filter.instructorId) conditions.push(eq(instructionals.instructorId, filter.instructorId));
-    if (filter.techniqueCategoryId)
-      conditions.push(eq(instructionals.techniqueCategoryId, filter.techniqueCategoryId));
-    if (filter.positionId) conditions.push(eq(instructionals.positionId, filter.positionId));
+    if (filter.instructorId)
+      conditions.push(eq(instructionals.instructorId, filter.instructorId));
+    if (filter.positionId)
+      conditions.push(eq(instructionals.positionId, filter.positionId));
+    if (filter.ruleset && filter.ruleset !== "unknown")
+      conditions.push(eq(instructionals.ruleset, filter.ruleset));
 
-    // Tag filter: resolve matching instructional IDs first, then constrain the flat query.
+    // Tag filter
     if (filter.tagId) {
       const matching = db
         .select({ id: instructionalTags.instructionalId })
@@ -553,6 +580,18 @@ export const storage = {
         .where(eq(instructionalTags.tagId, filter.tagId))
         .all();
       const ids = matching.map((m) => m.id);
+      if (ids.length === 0) return [];
+      conditions.push(inArray(instructionals.id, ids));
+    }
+
+    // Multi-technique filter: OR match via junction table
+    if (filter.techniqueCategoryIds && filter.techniqueCategoryIds.length > 0) {
+      const matching = db
+        .select({ id: instructionalTechniqueCategories.instructionalId })
+        .from(instructionalTechniqueCategories)
+        .where(inArray(instructionalTechniqueCategories.techniqueCategoryId, filter.techniqueCategoryIds))
+        .all();
+      const ids = [...new Set(matching.map((m) => m.id))];
       if (ids.length === 0) return [];
       conditions.push(inArray(instructionals.id, ids));
     }
@@ -575,8 +614,8 @@ export const storage = {
     }
 
     const rows = query.all() as Instructional[];
-    const { instructorMap, positionMap, categoryMap } = loadLookups();
-    let result = enrich(rows, instructorMap, positionMap, categoryMap);
+    const { instructorMap, positionMap } = loadLookups();
+    let result = enrich(rows, instructorMap, positionMap);
     if (typeof filter.watched === "boolean") {
       result = result.filter((r) => r.watched === filter.watched);
     }
@@ -586,8 +625,8 @@ export const storage = {
   getInstructional(id: number): InstructionalWithRelations | undefined {
     const row = db.select().from(instructionals).where(eq(instructionals.id, id)).get();
     if (!row) return undefined;
-    const { instructorMap, positionMap, categoryMap } = loadLookups();
-    return enrich([row], instructorMap, positionMap, categoryMap)[0];
+    const { instructorMap, positionMap } = loadLookups();
+    return enrich([row], instructorMap, positionMap)[0];
   },
 
   createInstructional(
@@ -601,8 +640,6 @@ export const storage = {
       .values({ ...rest, createdAt: ts, updatedAt: ts })
       .returning()
       .get();
-    // Compatibility: a legacy client may still send `filePath` instead of a
-    // videos[] array — fold it into a single video part.
     const legacyPath = (data as any).filePath;
     const parts: VideoPartInput[] = videos ?? (legacyPath ? [{ filePath: String(legacyPath), fileName: String((data as any).fileName ?? legacyPath), fileSize: (data as any).fileSize ?? null, duration: data.duration ?? null, sortOrder: 0, available: true }] : []);
     if (parts.length) this.replaceVideos(row.id, parts);
@@ -612,25 +649,23 @@ export const storage = {
 
   updateInstructional(
     id: number,
-    data: Partial<InsertInstructional> & { videos?: VideoPartInput[] }
+    data: Partial<InsertInstructional> & { videos?: VideoPartInput[]; techniqueCategoryIds?: number[] }
   ): InstructionalWithRelations | undefined {
-    const { videos, ...rest } = data as any;
+    const { videos, techniqueCategoryIds, ...rest } = data as any;
     db.update(instructionals)
       .set({ ...rest, updatedAt: now() })
       .where(eq(instructionals.id, id))
       .run();
-    // Only touch parts when `videos` is explicitly present (array). Omitted =
-    // preserve; empty array = clear all parts.
     if (Array.isArray(videos)) {
       this.replaceVideos(id, videos);
       syncInstructionalRollup(id);
     }
+    if (Array.isArray(techniqueCategoryIds)) {
+      this.setInstructionalTechniqueCategories(id, techniqueCategoryIds);
+    }
     return this.getInstructional(id);
   },
 
-  // Replace all video parts for an instructional. Used by create/update when a
-  // videos[] array is supplied. Preserves sortOrder from the supplied array
-  // (or defaults to the array index).
   replaceVideos(id: number, videos: VideoPartInput[]) {
     db.delete(instructionalVideos).where(eq(instructionalVideos.instructionalId, id)).run();
     if (!videos.length) return;
@@ -661,6 +696,18 @@ export const storage = {
     }
   },
 
+  // Set the full list of technique categories for an instructional (replaces existing)
+  setInstructionalTechniqueCategories(id: number, categoryIds: number[]) {
+    db.delete(instructionalTechniqueCategories)
+      .where(eq(instructionalTechniqueCategories.instructionalId, id))
+      .run();
+    if (categoryIds.length) {
+      db.insert(instructionalTechniqueCategories)
+        .values(categoryIds.map((c) => ({ instructionalId: id, techniqueCategoryId: c })))
+        .run();
+    }
+  },
+
   updateProgress(
     id: number,
     progress: number,
@@ -674,8 +721,6 @@ export const storage = {
     return this.getInstructional(id);
   },
 
-  // Fetch a single video part by id (used by the stream route). Returns the part
-  // together with its parent instructional id so the route can validate access.
   getVideo(videoId: number): InstructionalVideo | undefined {
     return db.select().from(instructionalVideos).where(eq(instructionalVideos.id, videoId)).get();
   },
@@ -721,8 +766,13 @@ export const storage = {
   },
 
   // ===== Positions =====
-  listPositions(): Position[] {
-    return db.select().from(positions).orderBy(asc(positions.sortOrder), asc(positions.name)).all();
+  // Accepts optional techniqueCategoryId to return only positions scoped to that technique.
+  listPositions(techniqueCategoryId?: number): Position[] {
+    let q: any = db.select().from(positions);
+    if (techniqueCategoryId) {
+      q = q.where(eq(positions.techniqueCategoryId, techniqueCategoryId));
+    }
+    return q.orderBy(asc(positions.sortOrder), asc(positions.name)).all();
   },
 
   createPosition(data: InsertPosition): Position {
@@ -792,23 +842,10 @@ export const storage = {
 
   // ===== Stats =====
   stats() {
-    const total = db
-      .select({ c: sql<number>`count(*)` })
-      .from(instructionals)
-      .get() as any;
-    const watched = db
-      .select({ c: sql<number>`count(*)` })
-      .from(instructionals)
-      .where(eq(instructionals.watched, true))
-      .get() as any;
-    const instructorCount = db
-      .select({ c: sql<number>`count(*)` })
-      .from(instructors)
-      .get() as any;
-    const totalDuration = db
-      .select({ c: sql<number>`coalesce(sum(${instructionals.duration}), 0)` })
-      .from(instructionals)
-      .get() as any;
+    const total = db.select({ c: sql<number>`count(*)` }).from(instructionals).get() as any;
+    const watched = db.select({ c: sql<number>`count(*)` }).from(instructionals).where(eq(instructionals.watched, true)).get() as any;
+    const instructorCount = db.select({ c: sql<number>`count(*)` }).from(instructors).get() as any;
+    const totalDuration = db.select({ c: sql<number>`coalesce(sum(${instructionals.duration}), 0)` }).from(instructionals).get() as any;
     return {
       total: Number(total?.c || 0),
       watched: Number(watched?.c || 0),
@@ -818,10 +855,6 @@ export const storage = {
   },
 
   // ===== Library scan =====
-  // Walks MEDIA_DIR for video files, groups them into folder-based
-  // instructionals (one row per title folder), and upserts the individual
-  // files as video parts. Returns counters for the UI. Idempotent: re-running
-  // on an unchanged library changes nothing.
   scanLibrary(): {
     scanned: number;
     added: number;
@@ -836,15 +869,11 @@ export const storage = {
     const found: { rel: string; name: string; size: number }[] = [];
     const warnings: string[] = [];
 
-    // Preflight: a missing or unreadable MEDIA_DIR is the most common reason a
-    // scan finds nothing (wrong volume mapping, or the non-root container user
-    // can't read the bind-mounted folder). Surface it explicitly instead of
-    // silently returning 0.
     if (!fs.existsSync(root)) {
       return {
         scanned: 0, added: 0, updated: 0, missing: 0, inferred: 0,
         mediaDir: root,
-        error: `Media directory not found: ${root}. In Docker, bind-mount your instructionals folder to /media (e.g. /volume1/Media/Instructionals:/media). Check the container's volume mapping.`,
+        error: `Media directory not found: ${root}. In Docker, bind-mount your instructionals folder to /media.`,
       };
     }
     try {
@@ -855,7 +884,7 @@ export const storage = {
       return {
         scanned: 0, added: 0, updated: 0, missing: 0, inferred: 0,
         mediaDir: root,
-        error: `Permission denied reading ${root}. The container is running as uid ${uid} / gid ${gid}, which cannot read this folder. Either grant read+execute permission on the host folder to that uid/gid, or run the container as a user that can read it (e.g. add user: "0:0" to docker-compose for a root test).`,
+        error: `Permission denied reading ${root}. Container running as uid ${uid}/gid ${gid}.`,
       };
     }
 
@@ -865,9 +894,6 @@ export const storage = {
         try {
           entries = fs.readdirSync(dir, { withFileTypes: true });
         } catch (err: any) {
-          // Don't silently swallow — record unreadable subdirectories so the
-          // user knows part of their library was skipped. Only the root is a
-          // hard failure (handled by the preflight above).
           warnings.push(`Could not read ${path.relative(root, dir) || "."}: ${err?.code || err?.message || "error"}`);
           return;
         }
@@ -880,9 +906,7 @@ export const storage = {
             if (VIDEO_EXTENSIONS.includes(ext)) {
               const rel = path.relative(root, full).replace(/\\/g, "/");
               let size = 0;
-              try {
-                size = fs.statSync(full).size;
-              } catch {}
+              try { size = fs.statSync(full).size; } catch {}
               found.push({ rel, name: entry.name, size });
             }
           }
@@ -891,12 +915,7 @@ export const storage = {
       walk(root);
     }
 
-    // Group found files by their derived folder key (Instructor/Title for
-    // 3+ segment paths, otherwise the file path itself — per-file instructionals).
-    const groups = new Map<
-      string,
-      { files: { rel: string; name: string; size: number }[] }
-    >();
+    const groups = new Map<string, { files: { rel: string; name: string; size: number }[] }>();
     for (const f of found) {
       const { folderPath } = deriveFolderFromPath(f.rel);
       const g = groups.get(folderPath) || { files: [] };
@@ -904,8 +923,6 @@ export const storage = {
       groups.set(folderPath, g);
     }
 
-    // Existing instructionals — normalize first (merge duplicate folders,
-    // reparent stray parts) so each folder maps to exactly one row.
     normalizeLibrary();
     const existing = db.select().from(instructionals).all();
     const folderToId = new Map<string, number>();
@@ -913,19 +930,14 @@ export const storage = {
       if (e.folderPath) folderToId.set(e.folderPath, e.id);
     }
     const byId = new Map(existing.map((e) => [e.id, e]));
-
-    // Existing video parts keyed by filePath, for upsert detection.
     const existingParts = db.select().from(instructionalVideos).all();
     const partByPath = new Map(existingParts.map((p) => [p.filePath, p]));
 
-    let added = 0;
-    let updated = 0;
-    let inferred = 0;
+    let added = 0, updated = 0, inferred = 0;
     const seenPartPaths = new Set<string>();
     const ts = now();
 
     for (const [folderPath, group] of groups) {
-      // Sort files within a folder by name so part order is stable.
       group.files.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
 
       let instructionalId = folderToId.get(folderPath);
@@ -937,21 +949,12 @@ export const storage = {
         if (instructor) inferred++;
         const row = db
           .insert(instructionals)
-          .values({
-            title,
-            instructorId,
-            folderPath,
-            available: true,
-            createdAt: ts,
-            updatedAt: ts,
-          })
+          .values({ title, instructorId, folderPath, available: true, createdAt: ts, updatedAt: ts })
           .returning()
           .get();
         instructionalId = row.id;
         added++;
       } else {
-        // Backfill a missing instructor from the folder layout (non-destructive:
-        // never overrides one the user already set).
         const ex = byId.get(instructionalId!);
         if (ex && !ex.instructorId) {
           const { instructor } = deriveFolderFromPath(group.files[0].rel);
@@ -966,15 +969,11 @@ export const storage = {
         }
       }
 
-      // Upsert each file as a video part. sortOrder = position within folder.
       for (let i = 0; i < group.files.length; i++) {
         const f = group.files[i];
         seenPartPaths.add(f.rel);
         const exPart = partByPath.get(f.rel);
         if (exPart) {
-          // Reparent if it landed on a (now-deleted) duplicate, refresh size /
-          // availability / sort order. If the file size changed (file replaced),
-          // clear the cached duration so ffprobe re-probes it next time.
           const sizeChanged = exPart.fileSize !== f.size;
           const changed =
             exPart.instructionalId !== instructionalId ||
@@ -1011,15 +1010,12 @@ export const storage = {
           if (!isNew) updated++;
         }
       }
-
       syncInstructionalRollup(instructionalId!);
     }
 
-    // Mark missing parts unavailable (file deleted from disk), then roll up so
-    // a folder with no remaining parts becomes unavailable too.
     let missing = 0;
     for (const p of existingParts) {
-      if (/^https?:\/\//i.test(p.filePath)) continue; // remote parts are never "missing"
+      if (/^https?:\/\//i.test(p.filePath)) continue;
       if (!seenPartPaths.has(p.filePath) && p.available) {
         db.update(instructionalVideos)
           .set({ available: false, updatedAt: ts })
@@ -1034,47 +1030,32 @@ export const storage = {
   },
 
   // ===== Thumbnails =====
-  // Resolve a stored thumbnail value to an on-disk absolute path under
-  // THUMBNAIL_DIR (with traversal protection), or null if there is none / it's
-  // a remote URL (handled by the route via redirect).
   resolveThumbnail(thumbnail: string | null | undefined): string | null {
     if (!thumbnail) return null;
-    if (/^https?:\/\//i.test(thumbnail)) return null; // remote — route redirects
+    if (/^https?:\/\//i.test(thumbnail)) return null;
     const resolved = path.resolve(THUMBNAIL_DIR, thumbnail);
     const rel = path.relative(THUMBNAIL_DIR, resolved);
     if (rel.startsWith("..") || path.isAbsolute(rel)) return null;
     return fs.existsSync(resolved) ? resolved : null;
   },
 
-  // (Re)generate a thumbnail for one instructional. Returns true on success.
   async generateThumbnail(id: number): Promise<boolean> {
     return (await generateThumbnail(id)) !== null;
   },
 
-  // Generate thumbnails for all instructionals that don't have one yet.
-  // Force-regenerates when `force` is true. Runs synchronously; for very large
-  // libraries this should be triggered deliberately (Settings button), not
-  // automatically on every scan.
   async generateMissingThumbnails(force = false): Promise<{ generated: number; failed: number; skipped: number }> {
     const rows = db.select().from(instructionals).all();
-    let generated = 0;
-    let failed = 0;
-    let skipped = 0;
+    let generated = 0, failed = 0, skipped = 0;
     for (const r of rows) {
-      if (!force && r.thumbnail && this.resolveThumbnail(r.thumbnail)) {
-        skipped++;
-        continue;
-      }
+      if (!force && r.thumbnail && this.resolveThumbnail(r.thumbnail)) { skipped++; continue; }
       const ok = await generateThumbnail(r.id);
-      if (ok) generated++;
-      else failed++;
+      if (ok) generated++; else failed++;
     }
     return { generated, failed, skipped };
   },
 
   // ===== Seed defaults =====
   async seedDefaults() {
-    // Always seed vocabularies (categories + positions) on first run.
     const catCount = db.select({ c: sql<number>`count(*)` }).from(techniqueCategories).get() as any;
     const vocabSeeded = Number(catCount?.c || 0) > 0;
     if (!vocabSeeded) {
@@ -1089,40 +1070,50 @@ export const storage = {
         { name: "Concept / Drill", slug: "concept", color: "#64748b", sortOrder: 8 },
       ];
       const ts = now();
+      const insertedCats: { [slug: string]: number } = {};
       for (const c of cats) {
-        db.insert(techniqueCategories).values({ ...c, createdAt: ts }).run();
+        const r = db.insert(techniqueCategories).values({ ...c, createdAt: ts }).returning().get();
+        insertedCats[c.slug] = r.id;
       }
 
-      const posList: { name: string; group: string; sortOrder: number }[] = [
-        { name: "Standing", group: "Neutral", sortOrder: 1 },
-        { name: "Closed Guard", group: "Guard", sortOrder: 2 },
-        { name: "Open Guard", group: "Guard", sortOrder: 3 },
-        { name: "Half Guard", group: "Guard", sortOrder: 4 },
-        { name: "Butterfly Guard", group: "Guard", sortOrder: 5 },
-        { name: "Spider Guard", group: "Guard", sortOrder: 6 },
-        { name: "De La Riva", group: "Guard", sortOrder: 7 },
-        { name: "Side Control", group: "Control", sortOrder: 8 },
-        { name: "Mount", group: "Control", sortOrder: 9 },
-        { name: "Knee on Belly", group: "Control", sortOrder: 10 },
-        { name: "North South", group: "Control", sortOrder: 11 },
-        { name: "Back Control", group: "Control", sortOrder: 12 },
-        { name: "Turtle", group: "Control", sortOrder: 13 },
-        { name: "Knee Cut", group: "Transition", sortOrder: 14 },
+      // Positions now linked to their technique category
+      const posList: { name: string; group: string; sortOrder: number; slug: string }[] = [
+        { name: "Standing", group: "Neutral", sortOrder: 1, slug: "takedown" },
+        { name: "Closed Guard", group: "Guard", sortOrder: 2, slug: "guard" },
+        { name: "Open Guard", group: "Guard", sortOrder: 3, slug: "guard" },
+        { name: "Half Guard", group: "Guard", sortOrder: 4, slug: "guard" },
+        { name: "Butterfly Guard", group: "Guard", sortOrder: 5, slug: "guard" },
+        { name: "Spider Guard", group: "Guard", sortOrder: 6, slug: "guard" },
+        { name: "De La Riva", group: "Guard", sortOrder: 7, slug: "guard" },
+        { name: "K Guard", group: "Guard", sortOrder: 8, slug: "guard" },
+        { name: "Side Control", group: "Control", sortOrder: 9, slug: "control" },
+        { name: "Mount", group: "Control", sortOrder: 10, slug: "control" },
+        { name: "Knee on Belly", group: "Control", sortOrder: 11, slug: "control" },
+        { name: "North South", group: "Control", sortOrder: 12, slug: "control" },
+        { name: "Back Control", group: "Control", sortOrder: 13, slug: "control" },
+        { name: "Turtle", group: "Control", sortOrder: 14, slug: "control" },
+        { name: "Knee Cut", group: "Passing", sortOrder: 15, slug: "passing" },
+        { name: "Toreando", group: "Passing", sortOrder: 16, slug: "passing" },
+        { name: "Over-Under", group: "Passing", sortOrder: 17, slug: "passing" },
+        { name: "Single Leg X", group: "Submission", sortOrder: 18, slug: "submission" },
+        { name: "Ashi Garami", group: "Submission", sortOrder: 19, slug: "submission" },
       ];
       for (const p of posList) {
-        db.insert(positions).values({ ...p, createdAt: ts }).run();
+        db.insert(positions).values({
+          name: p.name,
+          group: p.group,
+          sortOrder: p.sortOrder,
+          techniqueCategoryId: insertedCats[p.slug] ?? null,
+          createdAt: ts,
+        }).run();
       }
     }
 
-    // Demo instructionals (sample instructors + sample videos) only when
-    // DEMO_SEED=true — used for the hosted preview. Real Docker installs
-    // start with an empty library and scan their own media.
     if (process.env.DEMO_SEED !== "true") return;
     const instrCount = db.select({ c: sql<number>`count(*)` }).from(instructors).get() as any;
     if (Number(instrCount?.c || 0) > 0) return;
 
     const ts = now();
-    // Sample instructors
     const instr: { name: string; academy?: string; belt: string; bio?: string }[] = [
       { name: "Gordon Ryan", academy: "Danaher Death Squad", belt: "black", bio: "Multiple-time ADCC champion, no-gi specialist." },
       { name: "John Danaher", academy: "Danaher Death Squad", belt: "black", bio: "Systematic, leg-lock pioneer." },
@@ -1135,81 +1126,26 @@ export const storage = {
       instrIds.push(r.id);
     }
 
-    // Sample tags
     const tagNames = ["gi", "no-gi", "leglock", "back attack", "no-gi world", "competition"];
     for (const t of tagNames) db.insert(tags).values({ name: t, createdAt: ts }).run();
     const allTags = db.select().from(tags).all();
-
-    // Sample instructionals pointing at public sample videos so playback works out of the box
     const positionsAll = db.select().from(positions).all();
     const catsAll = db.select().from(techniqueCategories).all();
     const posByName = new Map(positionsAll.map((p) => [p.name, p]));
     const catBySlug = new Map(catsAll.map((c) => [c.slug, c]));
 
     const samples: {
-      title: string;
-      description: string;
-      instructorIdx: number;
-      position: string;
-      catSlug: string;
-      url: string;
-      tags: string[];
+      title: string; description: string; instructorIdx: number;
+      position: string; catSlug: string; url: string; tags: string[]; ruleset: string;
     }[] = [
-      {
-        title: "Systematically Attacking the Back — Volume 1",
-        description:
-          "A systematic approach to taking the back and finishing with the rear naked choke. Breaking down grips, establishing control, and the choke mechanics.",
-        instructorIdx: 0,
-        position: "Back Control",
-        catSlug: "submission",
-        url: "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/720/Big_Buck_Bunny_720_10s_1MB.mp4",
-        tags: ["no-gi", "back attack"],
-      },
-      {
-        title: "Enter the System: Leg Locks",
-        description:
-          "The complete leg-lock system — entries, control, and finishing ashi-garami and heel hooks.",
-        instructorIdx: 1,
-        position: "Open Guard",
-        catSlug: "submission",
-        url: "https://test-videos.co.uk/vids/sintel/mp4/h264/720/Sintel_720_10s_1MB.mp4",
-        tags: ["no-gi", "leglock"],
-      },
-      {
-        title: "Pressure Passing Masterclass",
-        description:
-          "Toreando, knee cut, and over-under passing systems for shutting down open guard.",
-        instructorIdx: 2,
-        position: "Open Guard",
-        catSlug: "passing",
-        url: "https://test-videos.co.uk/vids/jellyfish/mp4/h264/720/Jellyfish_720_10s_1MB.mp4",
-        tags: ["no-gi", "competition"],
-      },
-      {
-        title: "X-Guard & Guillotine Attacks",
-        description:
-          "Marcelo's signature x-guard entries and the high-elbow guillotine finish.",
-        instructorIdx: 3,
-        position: "Open Guard",
-        catSlug: "guard",
-        url: "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/360/Big_Buck_Bunny_360_10s_1MB.mp4",
-        tags: ["gi", "competition"],
-      },
-      {
-        title: "Mount Escapes & Retention",
-        description:
-          "Surviving mount: elbow-knee escape, bridge-and-roll, and defensive framing.",
-        instructorIdx: 0,
-        position: "Mount",
-        catSlug: "escape",
-        url: "https://test-videos.co.uk/vids/sintel/mp4/h264/360/Sintel_360_10s_1MB.mp4",
-        tags: ["gi"],
-      },
+      { title: "Systematically Attacking the Back — Volume 1", description: "A systematic approach to taking the back and finishing with the rear naked choke.", instructorIdx: 0, position: "Back Control", catSlug: "submission", url: "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/720/Big_Buck_Bunny_720_10s_1MB.mp4", tags: ["no-gi", "back attack"], ruleset: "nogi" },
+      { title: "Enter the System: Leg Locks", description: "The complete leg-lock system — entries, control, and finishing ashi-garami and heel hooks.", instructorIdx: 1, position: "Single Leg X", catSlug: "submission", url: "https://test-videos.co.uk/vids/sintel/mp4/h264/720/Sintel_720_10s_1MB.mp4", tags: ["no-gi", "leglock"], ruleset: "nogi" },
+      { title: "Pressure Passing Masterclass", description: "Toreando, knee cut, and over-under passing systems for shutting down open guard.", instructorIdx: 2, position: "Knee Cut", catSlug: "passing", url: "https://test-videos.co.uk/vids/jellyfish/mp4/h264/720/Jellyfish_720_10s_1MB.mp4", tags: ["no-gi", "competition"], ruleset: "both" },
+      { title: "X-Guard & Guillotine Attacks", description: "Marcelo's signature x-guard entries and the high-elbow guillotine finish.", instructorIdx: 3, position: "Open Guard", catSlug: "guard", url: "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/360/Big_Buck_Bunny_360_10s_1MB.mp4", tags: ["gi", "competition"], ruleset: "gi" },
+      { title: "Mount Escapes & Retention", description: "Surviving mount: elbow-knee escape, bridge-and-roll, and defensive framing.", instructorIdx: 0, position: "Mount", catSlug: "escape", url: "https://test-videos.co.uk/vids/sintel/mp4/h264/360/Sintel_360_10s_1MB.mp4", tags: ["gi"], ruleset: "gi" },
     ];
 
     for (const s of samples) {
-      // Synthetic, stable folder paths keep the demo entries grouped like a real
-      // library (Instructor/Title). The single sample video URL becomes one part.
       const folderPath = `demo/${instr[s.instructorIdx].name}/${s.title}`;
       const ins = db
         .insert(instructionals)
@@ -1219,31 +1155,27 @@ export const storage = {
           instructorId: instrIds[s.instructorIdx],
           positionId: posByName.get(s.position)?.id,
           techniqueCategoryId: catBySlug.get(s.catSlug)?.id,
+          ruleset: s.ruleset,
           folderPath,
-          // duration intentionally left unset — ffprobe fills it during
-          // thumbnail generation.
           available: true,
           createdAt: ts,
           updatedAt: ts,
         })
         .returning()
         .get();
+      // Also write to M2M junction
+      const catId = catBySlug.get(s.catSlug)?.id;
+      if (catId) {
+        db.insert(instructionalTechniqueCategories)
+          .values({ instructionalId: ins.id, techniqueCategoryId: catId })
+          .run();
+      }
       db.insert(instructionalVideos)
-        .values({
-          instructionalId: ins.id,
-          filePath: s.url,
-          fileName: s.title,
-          sortOrder: 0,
-          available: true,
-          createdAt: ts,
-          updatedAt: ts,
-        })
+        .values({ instructionalId: ins.id, filePath: s.url, fileName: s.title, sortOrder: 0, available: true, createdAt: ts, updatedAt: ts })
         .run();
       const tagIds = allTags.filter((t) => s.tags.includes(t.name)).map((t) => t.id);
       if (tagIds.length) {
-        db.insert(instructionalTags)
-          .values(tagIds.map((t) => ({ instructionalId: ins.id, tagId: t })))
-          .run();
+        db.insert(instructionalTags).values(tagIds.map((t) => ({ instructionalId: ins.id, tagId: t }))).run();
       }
     }
   },
