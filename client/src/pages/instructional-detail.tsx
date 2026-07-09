@@ -155,7 +155,7 @@ export default function InstructionalDetail() {
           className="w-full aspect-video"
           onTimeUpdate={onTimeUpdate}
           onEnded={onEnded}
-          poster={it.thumbnail || undefined}
+          poster={it.thumbnail ? apiUrl(`/api/thumb/${it.id}?v=${it.updatedAt}`) : undefined}
           data-testid="video-player"
         />
       </div>

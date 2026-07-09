@@ -10,7 +10,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { Plus, Trash2, ScanLine, FolderTree, Tag, MapPin, Layers } from "lucide-react";
+import { Plus, Trash2, ScanLine, FolderTree, Tag, MapPin, Layers, ImageIcon } from "lucide-react";
 
 export default function Settings() {
   const qc = useQueryClient();
@@ -19,6 +19,7 @@ export default function Settings() {
   const [newPos, setNewPos] = useState({ name: "", group: "Other" });
   const [newTag, setNewTag] = useState("");
   const [scanResult, setScanResult] = useState<any>(null);
+  const [thumbResult, setThumbResult] = useState<any>(null);
 
   const stats = useQuery({
     queryKey: ["/api/stats"],
@@ -50,6 +51,25 @@ export default function Settings() {
       qc.invalidateQueries({ queryKey: ["/api/stats"] });
     },
     onError: () => toast({ title: "Scan failed", variant: "destructive" }),
+  });
+
+  const thumbMutation = useMutation({
+    mutationFn: async () => apiRequest("POST", "/api/instructionals/thumbnails"),
+    onSuccess: async (res) => {
+      const data = await res.json();
+      setThumbResult(data);
+      toast({
+        title: "Thumbnails generated",
+        description: `Generated ${data.generated} • Failed ${data.failed} • Skipped ${data.skipped}`,
+      });
+      qc.invalidateQueries({ queryKey: ["/api/instructionals"] });
+    },
+    onError: () =>
+      toast({
+        title: "Thumbnail generation failed",
+        description: "Is ffmpeg installed in the container?",
+        variant: "destructive",
+      }),
   });
 
   const addCat = useMutation({
@@ -141,6 +161,28 @@ export default function Settings() {
                 updated {scanResult.updated} · missing {scanResult.missing}
               </span>
             )}
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3 pt-2 border-t border-card-border/60">
+            <Button
+              variant="secondary"
+              onClick={() => thumbMutation.mutate()}
+              disabled={thumbMutation.isPending}
+            >
+              <ImageIcon className="size-4" />
+              {thumbMutation.isPending ? "Generating…" : "Generate thumbnails"}
+            </Button>
+            {thumbResult && (
+              <span className="text-xs text-muted-foreground font-mono">
+                generated {thumbResult.generated} · failed {thumbResult.failed}
+                · skipped {thumbResult.skipped}
+              </span>
+            )}
+            <p className="text-xs text-muted-foreground basis-full">
+              Extracts a preview frame from each video using ffmpeg. Stored in
+              the data volume so they persist across restarts. Re-run after
+              adding new videos.
+            </p>
           </div>
         </CardContent>
       </Card>

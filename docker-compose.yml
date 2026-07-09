@@ -18,6 +18,8 @@ services:
       - MEDIA_DIR=/media
       # SQLite database location (on the persistent volume)
       - DB_PATH=/data/data.db
+      # Where generated thumbnails are stored (on the persistent volume)
+      - THUMBNAIL_DIR=/data/thumbnails
       # Web server port (inside container)
       - PORT=5000
       # Optional: override the timezone for timestamps

@@ -1,14 +1,23 @@
+import { useState, useEffect } from "react";
 import { Link } from "wouter";
 import { Play, CheckCircle2, AlertTriangle } from "lucide-react";
 import type { InstructionalWithRelations } from "@shared/schema";
 import { TechniqueBadge } from "./technique-badge";
 import { formatDuration, formatBytes, formatRelative, hexToRgba } from "@/lib/format";
+import { apiUrl } from "@/lib/queryClient";
 
 export function InstructionalCard({
   item,
 }: {
   item: InstructionalWithRelations;
 }) {
+  const [thumbFailed, setThumbFailed] = useState(false);
+  // Reset the failure flag if the item (or its thumbnail version) changes so a
+  // regenerated thumbnail is retried instead of staying on the fallback.
+  useEffect(() => {
+    setThumbFailed(false);
+  }, [item.thumbnail, item.updatedAt]);
+  const showThumb = !!item.thumbnail && !thumbFailed;
   const progressPct =
     item.duration && item.duration > 0
       ? Math.min(100, Math.round((item.progress / item.duration) * 100))
@@ -34,9 +43,21 @@ export function InstructionalCard({
             : { background: "linear-gradient(160deg, hsl(var(--card)), hsl(var(--sidebar-accent)))" }
         }
       >
+        {showThumb && (
+          <img
+            src={apiUrl(`/api/thumb/${item.id}?v=${item.updatedAt}`)}
+            alt={item.title}
+            loading="lazy"
+            onError={() => setThumbFailed(true)}
+            className="absolute inset-0 size-full object-cover"
+            data-testid={`img-thumb-${item.id}`}
+          />
+        )}
         <div className="absolute inset-0 flex items-center justify-center">
           <Play
-            className="size-9 text-foreground/15 group-hover:text-primary group-hover:scale-110 transition-all duration-200"
+            className={`size-9 text-foreground/15 group-hover:text-primary group-hover:scale-110 transition-all duration-200 ${
+              showThumb ? "opacity-0 group-hover:opacity-100" : ""
+            }`}
             fill="currentColor"
           />
         </div>

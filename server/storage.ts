@@ -23,6 +23,10 @@ import Database from "better-sqlite3";
 import { eq, and, like, or, inArray, desc, asc, sql } from "drizzle-orm";
 import fs from "node:fs";
 import path from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 
 const DB_PATH = process.env.DB_PATH || "./data/data.db";
 // Ensure the directory exists
@@ -38,6 +42,128 @@ export const db = drizzle(sqlite, {
 
 // Media directory (mounted volume in Docker)
 export const MEDIA_DIR = process.env.MEDIA_DIR || path.resolve(process.cwd(), "media");
+
+// Thumbnails live in the writable data volume (NOT read-only /media) so they
+// persist across container restarts. Controlled by THUMBNAIL_DIR, defaulting to
+// a `thumbnails` folder next to the SQLite database.
+export const THUMBNAIL_DIR =
+  process.env.THUMBNAIL_DIR || path.join(path.dirname(path.resolve(DB_PATH)), "thumbnails");
+fs.mkdirSync(THUMBNAIL_DIR, { recursive: true });
+
+// Whether ffmpeg/ffprobe are available. If not, thumbnail generation is a no-op
+// (the gradient fallback is used) instead of an error.
+let ffmpegAvailable: boolean | null = null;
+async function checkFfmpeg(): Promise<boolean> {
+  if (ffmpegAvailable !== null) return ffmpegAvailable;
+  try {
+    await execFileAsync("ffmpeg", ["-version"]);
+    await execFileAsync("ffprobe", ["-version"]);
+    ffmpegAvailable = true;
+  } catch {
+    ffmpegAvailable = false;
+    console.warn("ffmpeg/ffprobe not found — thumbnail generation disabled.");
+  }
+  return ffmpegAvailable;
+}
+
+// Resolve the on-disk absolute path for an instructional's source video.
+// Returns null for remote URLs (handled separately) or invalid/traversing paths.
+function resolveLocalSource(filePath: string): string | null {
+  if (/^https?:\/\//i.test(filePath)) return null;
+  const resolved = path.resolve(MEDIA_DIR, filePath);
+  const rel = path.relative(MEDIA_DIR, resolved);
+  if (rel.startsWith("..") || path.isAbsolute(rel)) return null;
+  return resolved;
+}
+
+// Probe a video's duration (seconds) with ffprobe. Returns null on failure.
+async function probeDuration(source: string): Promise<number | null> {
+  const isRemote = /^https?:\/\//i.test(source);
+  try {
+    const inputArgs = isRemote
+      ? ["-user_agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36", "-timeout", "15000000", "-i", source]
+      : ["-i", source];
+    const { stdout } = await execFileAsync("ffprobe", [
+      "-v", "error",
+      ...inputArgs,
+      "-show_entries", "format=duration",
+      "-of", "default=noprint_wrappers=1:nokey=1",
+    ], { timeout: 15000 });
+    const d = parseFloat(stdout.trim());
+    return Number.isFinite(d) && d > 0 ? d : null;
+  } catch {
+    return null;
+  }
+}
+
+// Generate a single thumbnail for an instructional. Resolves the source
+// (local file or remote URL), seeks ~10% in (clamped), and writes a JPEG into
+// THUMBNAIL_DIR. Stores the relative filename in the `thumbnail` column and
+// updates `duration` if missing. Returns the stored filename or null on failure.
+async function generateThumbnail(id: number): Promise<string | null> {
+  if (!(await checkFfmpeg())) return null;
+  const item = db.select().from(instructionals).where(eq(instructionals.id, id)).get();
+  if (!item) return null;
+
+  // Remote URL or local path — both are valid ffmpeg inputs.
+  const local = resolveLocalSource(item.filePath);
+  const isRemote = /^https?:\/\//i.test(item.filePath);
+  // Only fetch arbitrary remote URLs for thumbnailing when explicitly allowed
+  // (demo preview) — avoids server-side fetching of user-entered URLs in
+  // normal Docker installs.
+  const allowRemote =
+    process.env.DEMO_SEED === "true" || process.env.ALLOW_REMOTE_THUMBNAILS === "true";
+  if (isRemote && !allowRemote) return null;
+  const source = local ?? (isRemote ? item.filePath : null);
+  if (!source) return null;
+
+  // Duration: prefer existing DB value, else probe.
+  let duration = item.duration ?? null;
+  if (!duration) {
+    duration = await probeDuration(source);
+    if (duration) {
+      db.update(instructionals)
+        .set({ duration: Math.round(duration), updatedAt: now() })
+        .where(eq(instructionals.id, id))
+        .run();
+    }
+  }
+
+  // Seek ~10% in, clamped to [1, 30]s so short clips and long films both land sensibly.
+  const seek = duration ? Math.max(1, Math.min(duration * 0.1, 30)) : 5;
+  const outName = `instructional-${id}.jpg`;
+  const outPath = path.join(THUMBNAIL_DIR, outName);
+
+  try {
+    // `-ss` before `-i` is a fast seek. For remote URLs send a browser-like
+    // User-Agent (some hosts 403 ffmpeg's default) and cap socket read time so a
+    // dead host can't hang generation.
+    const inputArgs = /^https?:\/\//i.test(source)
+      ? ["-user_agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36", "-timeout", "15000000", "-i", source]
+      : ["-i", source];
+    await execFileAsync("ffmpeg", [
+      "-y",
+      "-ss", String(Math.floor(seek)),
+      ...inputArgs,
+      "-frames:v", "1",
+      "-vf", "scale=640:-2",
+      "-q:v", "4",
+      "-update", "1",
+      outPath,
+    ], { timeout: 30000 });
+    if (!fs.existsSync(outPath) || fs.statSync(outPath).size === 0) return null;
+  } catch (err) {
+    // Clean up a partial/empty file if ffmpeg left one.
+    try { if (fs.existsSync(outPath)) fs.unlinkSync(outPath); } catch {}
+    return null;
+  }
+
+  db.update(instructionals)
+    .set({ thumbnail: outName, updatedAt: now() })
+    .where(eq(instructionals.id, id))
+    .run();
+  return outName;
+}
 
 // ---------- Schema bootstrap (fresh installs / new Docker volumes) ----------
 // Creates tables if they don't exist so the app works without drizzle-kit in the
@@ -459,8 +585,10 @@ export const storage = {
       const ex = byPath.get(f.rel);
       if (ex) {
         if (!ex.available || ex.fileSize !== f.size) {
+          // File changed (or reappeared): invalidate the cached thumbnail and
+          // duration so the next "Generate thumbnails" run regenerates them.
           db.update(instructionals)
-            .set({ available: true, fileSize: f.size, updatedAt: now() })
+            .set({ available: true, fileSize: f.size, thumbnail: null, duration: null, updatedAt: now() })
             .where(eq(instructionals.id, ex.id))
             .run();
           updated++;
@@ -496,6 +624,45 @@ export const storage = {
     }
 
     return { scanned: found.length, added, updated, missing };
+  },
+
+  // ===== Thumbnails =====
+  // Resolve a stored thumbnail value to an on-disk absolute path under
+  // THUMBNAIL_DIR (with traversal protection), or null if there is none / it's
+  // a remote URL (handled by the route via redirect).
+  resolveThumbnail(thumbnail: string | null | undefined): string | null {
+    if (!thumbnail) return null;
+    if (/^https?:\/\//i.test(thumbnail)) return null; // remote — route redirects
+    const resolved = path.resolve(THUMBNAIL_DIR, thumbnail);
+    const rel = path.relative(THUMBNAIL_DIR, resolved);
+    if (rel.startsWith("..") || path.isAbsolute(rel)) return null;
+    return fs.existsSync(resolved) ? resolved : null;
+  },
+
+  // (Re)generate a thumbnail for one instructional. Returns true on success.
+  async generateThumbnail(id: number): Promise<boolean> {
+    return (await generateThumbnail(id)) !== null;
+  },
+
+  // Generate thumbnails for all instructionals that don't have one yet.
+  // Force-regenerates when `force` is true. Runs synchronously; for very large
+  // libraries this should be triggered deliberately (Settings button), not
+  // automatically on every scan.
+  async generateMissingThumbnails(force = false): Promise<{ generated: number; failed: number; skipped: number }> {
+    const rows = db.select().from(instructionals).all();
+    let generated = 0;
+    let failed = 0;
+    let skipped = 0;
+    for (const r of rows) {
+      if (!force && r.thumbnail && this.resolveThumbnail(r.thumbnail)) {
+        skipped++;
+        continue;
+      }
+      const ok = await generateThumbnail(r.id);
+      if (ok) generated++;
+      else failed++;
+    }
+    return { generated, failed, skipped };
   },
 
   // ===== Seed defaults =====
@@ -588,7 +755,7 @@ export const storage = {
         instructorIdx: 0,
         position: "Back Control",
         catSlug: "submission",
-        url: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
+        url: "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/720/Big_Buck_Bunny_720_10s_1MB.mp4",
         tags: ["no-gi", "back attack"],
       },
       {
@@ -598,7 +765,7 @@ export const storage = {
         instructorIdx: 1,
         position: "Open Guard",
         catSlug: "submission",
-        url: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4",
+        url: "https://test-videos.co.uk/vids/sintel/mp4/h264/720/Sintel_720_10s_1MB.mp4",
         tags: ["no-gi", "leglock"],
       },
       {
@@ -608,7 +775,7 @@ export const storage = {
         instructorIdx: 2,
         position: "Open Guard",
         catSlug: "passing",
-        url: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4",
+        url: "https://test-videos.co.uk/vids/jellyfish/mp4/h264/720/Jellyfish_720_10s_1MB.mp4",
         tags: ["no-gi", "competition"],
       },
       {
@@ -618,7 +785,7 @@ export const storage = {
         instructorIdx: 3,
         position: "Open Guard",
         catSlug: "guard",
-        url: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4",
+        url: "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/360/Big_Buck_Bunny_360_10s_1MB.mp4",
         tags: ["gi", "competition"],
       },
       {
@@ -628,7 +795,7 @@ export const storage = {
         instructorIdx: 0,
         position: "Mount",
         catSlug: "escape",
-        url: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerFun.mp4",
+        url: "https://test-videos.co.uk/vids/sintel/mp4/h264/360/Sintel_360_10s_1MB.mp4",
         tags: ["gi"],
       },
     ];
@@ -644,7 +811,8 @@ export const storage = {
           techniqueCategoryId: catBySlug.get(s.catSlug)?.id,
           filePath: s.url,
           fileName: s.title,
-          duration: 600,
+          // duration intentionally left unset — ffprobe fills it during
+          // thumbnail generation.
           available: true,
           createdAt: ts,
           updatedAt: ts,

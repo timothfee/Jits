@@ -111,6 +111,51 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
+  // ===== Thumbnails =====
+  // Serve a generated thumbnail for an instructional.
+  app.get("/api/thumb/:id", (req, res) => {
+    const id = Number(req.params.id);
+    const item = storage.getInstructional(id);
+    if (!item) return res.status(404).json({ message: "Not found" });
+
+    // Remote thumbnail URL → let the browser fetch it directly.
+    if (item.thumbnail && /^https?:\/\//i.test(item.thumbnail)) {
+      return res.redirect(item.thumbnail);
+    }
+
+    const file = storage.resolveThumbnail(item.thumbnail);
+    if (!file) return res.status(404).json({ message: "No thumbnail" });
+
+    res.setHeader("Content-Type", "image/jpeg");
+    res.setHeader("Cache-Control", "public, max-age=604800, immutable");
+    fs.createReadStream(file).pipe(res);
+  });
+
+  // (Re)generate a thumbnail for a single instructional.
+  app.post("/api/instructionals/:id/thumbnail", async (req, res) => {
+    const id = Number(req.params.id);
+    if (!storage.getInstructional(id))
+      return res.status(404).json({ message: "Not found" });
+    try {
+      const ok = await storage.generateThumbnail(id);
+      if (!ok) return res.status(422).json({ message: "Could not generate thumbnail" });
+      res.json(storage.getInstructional(id));
+    } catch (err: any) {
+      res.status(500).json({ message: err.message });
+    }
+  });
+
+  // Bulk-generate thumbnails for all instructionals missing one (or all, with ?force=true).
+  app.post("/api/instructionals/thumbnails", async (req, res) => {
+    try {
+      const force = req.query.force === "true";
+      const result = await storage.generateMissingThumbnails(force);
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ message: err.message });
+    }
+  });
+
   // ===== Video streaming (range support) =====
   app.get("/api/stream/:id", (req, res) => {
     const id = Number(req.params.id);
