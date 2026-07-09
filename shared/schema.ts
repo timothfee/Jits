@@ -136,6 +136,28 @@ export const VIDEO_EXTENSIONS = [
   ".mpeg",
 ];
 
+// Map a video file extension to a MIME type for streaming. Browsers are picky
+// about the Content-Type on <video> sources — a wrong type can break playback
+// or seeking. Fallback to application/octet-stream so the route still streams.
+export const VIDEO_MIME_TYPES: Record<string, string> = {
+  ".mp4": "video/mp4",
+  ".m4v": "video/mp4",
+  ".webm": "video/webm",
+  ".mkv": "video/x-matroska",
+  ".mov": "video/quicktime",
+  ".avi": "video/x-msvideo",
+  ".wmv": "video/x-ms-wmv",
+  ".flv": "video/x-flv",
+  ".ts": "video/mp2t",
+  ".mpg": "video/mpeg",
+  ".mpeg": "video/mpeg",
+};
+
+export function videoMimeType(filePath: string): string {
+  const ext = filePath.slice(filePath.lastIndexOf(".")).toLowerCase();
+  return VIDEO_MIME_TYPES[ext] ?? "application/octet-stream";
+}
+
 export const BELT_COLORS = [
   "white",
   "blue",

@@ -10,6 +10,7 @@ import {
   insertTechniqueCategorySchema,
   insertTagSchema,
   updateInstructionalSchema,
+  videoMimeType,
 } from "@shared/schema";
 
 function resolveFilePath(filePath: string): string {
@@ -179,6 +180,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
     const stat = fs.statSync(resolved);
     const fileSize = stat.size;
+    // Derive the Content-Type from the actual file extension so non-mp4
+    // containers (mkv, webm, mov, ...) aren't mislabeled.
+    const contentType = videoMimeType(item.filePath);
     const range = req.headers.range;
     if (range) {
       const parts = range.replace(/bytes=/, "").split("-");
@@ -190,13 +194,13 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         "Content-Range": `bytes ${start}-${end}/${fileSize}`,
         "Accept-Ranges": "bytes",
         "Content-Length": chunkSize,
-        "Content-Type": "video/mp4",
+        "Content-Type": contentType,
       });
       stream.pipe(res);
     } else {
       res.writeHead(200, {
         "Content-Length": fileSize,
-        "Content-Type": "video/mp4",
+        "Content-Type": contentType,
         "Accept-Ranges": "bytes",
       });
       fs.createReadStream(resolved).pipe(res);
