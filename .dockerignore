@@ -1,0 +1,11 @@
+node_modules
+dist
+data
+media
+*.db
+*.db-*
+.git
+.gitignore
+*.md
+.env*
+migrations
