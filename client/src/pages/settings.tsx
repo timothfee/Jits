@@ -45,7 +45,7 @@ export default function Settings() {
       setScanResult(data);
       toast({
         title: "Scan complete",
-        description: `Added ${data.added} • Updated ${data.updated} • Missing ${data.missing}`,
+        description: `Added ${data.added} • Updated ${data.updated} • Instructors inferred ${data.inferred ?? 0} • Missing ${data.missing}`,
       });
       qc.invalidateQueries({ queryKey: ["/api/instructionals"] });
       qc.invalidateQueries({ queryKey: ["/api/stats"] });
@@ -158,7 +158,8 @@ export default function Settings() {
             {scanResult && (
               <span className="text-xs text-muted-foreground font-mono">
                 scanned {scanResult.scanned} · added {scanResult.added} ·
-                updated {scanResult.updated} · missing {scanResult.missing}
+                updated {scanResult.updated} · inferred {scanResult.inferred ?? 0} ·
+                missing {scanResult.missing}
               </span>
             )}
           </div>

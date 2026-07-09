@@ -288,6 +288,33 @@ function loadLookups() {
   return { instructorMap, positionMap, categoryMap };
 }
 
+// Derive an instructor name and title from a video's path relative to MEDIA_DIR.
+// Supports the common layout:
+//   <Instructor>/<Title>/<file>.mkv   -> instructor = "Instructor", title = "Title"
+// Shallower layouts degrade gracefully:
+//   <Instructor>/<file>.mkv            -> instructor = "Instructor", title = filename
+//   <file>.mkv                         -> no instructor, title = filename
+// Returns null for instructor when it can't be inferred.
+function deriveFromPath(rel: string): { instructor: string | null; title: string } {
+  const norm = rel.replace(/\\/g, "/"); // tolerate Windows-style separators
+  const parts = norm.split("/").filter(Boolean);
+  const file = parts[parts.length - 1] || rel;
+  const titleFromFile = path.basename(file, path.extname(file));
+  // Need at least <Instructor>/<file> to infer an instructor.
+  if (parts.length < 2) return { instructor: null, title: titleFromFile };
+  const instructor = parts[0];
+  // 3+ segments => <Instructor>/<Title>/<file> : prefer the title folder.
+  const title = parts.length >= 3 ? parts[parts.length - 2] : titleFromFile;
+  return { instructor, title };
+}
+
+// Find an instructor by exact name, creating one if it doesn't exist yet.
+function getOrCreateInstructor(name: string): Instructor {
+  const existing = db.select().from(instructors).where(eq(instructors.name, name)).get();
+  if (existing) return existing;
+  return db.insert(instructors).values({ name, createdAt: now() }).returning().get();
+}
+
 // ---------- Filters ----------
 export interface InstructionalFilter {
   q?: string;
@@ -542,6 +569,7 @@ export const storage = {
     added: number;
     updated: number;
     missing: number;
+    inferred: number;
   } {
     const root = MEDIA_DIR;
     const found: { rel: string; name: string; size: number }[] = [];
@@ -578,12 +606,26 @@ export const storage = {
     const byPath = new Map(existing.map((e) => [e.filePath, e]));
     let added = 0;
     let updated = 0;
+    let inferred = 0;
     const seenPaths = new Set<string>();
 
     for (const f of found) {
       seenPaths.add(f.rel);
       const ex = byPath.get(f.rel);
       if (ex) {
+        // Backfill a missing instructor from the folder layout (non-destructive:
+        // never overrides an instructor the user already set).
+        if (!ex.instructorId) {
+          const { instructor } = deriveFromPath(f.rel);
+          if (instructor) {
+            const ins = getOrCreateInstructor(instructor);
+            db.update(instructionals)
+              .set({ instructorId: ins.id, updatedAt: now() })
+              .where(eq(instructionals.id, ex.id))
+              .run();
+            inferred++;
+          }
+        }
         if (!ex.available || ex.fileSize !== f.size) {
           // File changed (or reappeared): invalidate the cached thumbnail and
           // duration so the next "Generate thumbnails" run regenerates them.
@@ -594,10 +636,12 @@ export const storage = {
           updated++;
         }
       } else {
-        const title = path.basename(f.name, path.extname(f.name));
+        const { instructor, title } = deriveFromPath(f.rel);
+        const instructorId = instructor ? getOrCreateInstructor(instructor).id : undefined;
         db.insert(instructionals)
           .values({
             title,
+            instructorId,
             filePath: f.rel,
             fileName: f.name,
             fileSize: f.size,
@@ -607,6 +651,7 @@ export const storage = {
           })
           .returning()
           .get();
+        if (instructor) inferred++;
         added++;
       }
     }
@@ -623,7 +668,7 @@ export const storage = {
       }
     }
 
-    return { scanned: found.length, added, updated, missing };
+    return { scanned: found.length, added, updated, missing, inferred };
   },
 
   // ===== Thumbnails =====

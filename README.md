@@ -36,6 +36,19 @@ Your database lives in the `jits-data` volume, so metadata survives container up
 ### Adding instructionals
 
 - **From your folder**: drop video files (`.mp4`, `.mkv`, `.webm`, `.mov`, …) into your mounted `/media` directory and hit **Scan library**. New files are added; moved/deleted files are marked missing.
+- **Auto instructor + title from folders**: organize your library as
+  `<Instructor>/<Title>/<file>.mkv` and the scanner assigns the instructor and
+  title automatically during a scan, creating the instructor if it doesn't exist yet.
+  Shallower layouts degrade gracefully:
+
+  | Folder layout | Instructor | Title |
+  | --- | --- | --- |
+  | `Gordon Ryan/Back Attacks/vol1.mkv` | Gordon Ryan | Back Attacks |
+  | `Gordon Ryan/vol1.mkv` | Gordon Ryan | vol1 |
+  | `vol1.mkv` | *(none)* | vol1 |
+
+  Re-scanning also backfills a missing instructor on existing entries (it never
+  overrides an instructor you've set manually).
 - **Manually**: open any instructional's detail page → **Edit** → fill in the metadata and a file path (or a direct video URL).
 
 ## Local development
