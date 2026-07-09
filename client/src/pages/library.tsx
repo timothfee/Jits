@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useLocation } from "wouter";
 import { useQuery } from "@tanstack/react-query";
 import { apiUrl } from "@/lib/queryClient";
@@ -7,7 +7,6 @@ import {
   InstructionalCardSkeleton,
   EmptyLibrary,
 } from "@/components/instructional-card";
-import { TechniqueBadge } from "@/components/technique-badge";
 import { Button } from "@/components/ui/button";
 import {
   Filter,
@@ -17,7 +16,6 @@ import {
   CircleDot,
   Search,
 } from "lucide-react";
-import { useState } from "react";
 
 type Filters = {
   q?: string;
@@ -30,10 +28,13 @@ type Filters = {
 };
 
 function useFilters(): [Filters, (patch: Partial<Filters>) => void, () => void] {
-  const [location, setLocation] = useLocation();
-  const params = new URLSearchParams(
-    location.includes("?") ? location.split("?")[1] : ""
-  );
+  const [location] = useLocation();
+
+  const rawHash = typeof window !== "undefined" ? window.location.hash.slice(1) : location;
+  const hashLocation = rawHash || location || "/";
+  const [basePath, search = ""] = hashLocation.split("?");
+  const params = new URLSearchParams(search);
+
   const filters: Filters = {
     q: params.get("q") || undefined,
     instructorId: params.get("instructorId")
@@ -49,22 +50,27 @@ function useFilters(): [Filters, (patch: Partial<Filters>) => void, () => void] 
     watched: params.get("watched") === "true" ? true : undefined,
     sort: params.get("sort") || undefined,
   };
+
   const setFilters = (patch: Partial<Filters>) => {
     const p = new URLSearchParams(params);
     for (const [k, v] of Object.entries(patch)) {
       if (v === undefined || v === "") p.delete(k);
       else p.set(k, String(v));
     }
-    const base = location.split("?")[0];
-    setLocation(base + (p.toString() ? `?${p.toString()}` : ""));
+    const nextHash = `${basePath || "/"}${p.toString() ? `?${p.toString()}` : ""}`;
+    window.location.hash = nextHash;
   };
-  const clear = () => setLocation(location.split("?")[0]);
+
+  const clear = () => {
+    window.location.hash = basePath || "/";
+  };
+
   return [filters, setFilters, clear];
 }
 
 const SORTS = [
   { value: "recent", label: "Recently added" },
-  { value: "title", label: "Title A–Z" },
+  { value: "title", label: "Title A\u2013Z" },
   { value: "rating", label: "Highest rated" },
   { value: "progress", label: "In progress" },
 ];
@@ -86,7 +92,7 @@ export default function Library() {
   const list = useQuery({
     queryKey: ["/api/instructionals", params.toString()],
     queryFn: async ({ queryKey }) => {
-      const [base, qs] = queryKey;
+      const [base, qs] = queryKey as [string, string];
       const url = qs ? `${apiUrl(base)}?${qs}` : apiUrl(base);
       const res = await fetch(url);
       if (!res.ok) throw new Error("failed");
@@ -96,19 +102,31 @@ export default function Library() {
 
   const categories = useQuery({
     queryKey: ["/api/categories"],
-    queryFn: async ({ queryKey }) => (await fetch(apiUrl(queryKey.join("/")))).json(),
+    queryFn: async () => {
+      const res = await fetch(apiUrl("/api/categories"));
+      return res.json();
+    },
   });
   const positions = useQuery({
     queryKey: ["/api/positions"],
-    queryFn: async ({ queryKey }) => (await fetch(apiUrl(queryKey.join("/")))).json(),
+    queryFn: async () => {
+      const res = await fetch(apiUrl("/api/positions"));
+      return res.json();
+    },
   });
   const instructors = useQuery({
     queryKey: ["/api/instructors"],
-    queryFn: async ({ queryKey }) => (await fetch(apiUrl(queryKey.join("/")))).json(),
+    queryFn: async () => {
+      const res = await fetch(apiUrl("/api/instructors"));
+      return res.json();
+    },
   });
   const tags = useQuery({
     queryKey: ["/api/tags"],
-    queryFn: async ({ queryKey }) => (await fetch(apiUrl(queryKey.join("/")))).json(),
+    queryFn: async () => {
+      const res = await fetch(apiUrl("/api/tags"));
+      return res.json();
+    },
   });
 
   const positionsByGroup = useMemo(() => {
@@ -132,7 +150,6 @@ export default function Library() {
 
   const FilterPanel = (
     <div className="space-y-6">
-      {/* Categories */}
       <div>
         <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2 font-mono">
           Technique
@@ -163,7 +180,6 @@ export default function Library() {
         </div>
       </div>
 
-      {/* Positions */}
       <div>
         <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2 font-mono">
           Position
@@ -199,7 +215,6 @@ export default function Library() {
         </div>
       </div>
 
-      {/* Instructors */}
       <div>
         <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2 font-mono">
           Instructor
@@ -229,7 +244,6 @@ export default function Library() {
         </div>
       </div>
 
-      {/* Tags */}
       {tags.data?.length > 0 && (
         <div>
           <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2 font-mono">
@@ -257,7 +271,6 @@ export default function Library() {
         </div>
       )}
 
-      {/* Status */}
       <div>
         <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2 font-mono">
           Status
@@ -279,7 +292,6 @@ export default function Library() {
 
   return (
     <div className="flex h-full">
-      {/* Filter rail (desktop) */}
       <div className="hidden lg:block w-64 shrink-0 border-r border-border overflow-y-auto p-4">
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-2 text-sm font-semibold">
@@ -306,18 +318,16 @@ export default function Library() {
         {FilterPanel}
       </div>
 
-      {/* Content */}
       <div className="flex-1 min-w-0 overflow-y-auto">
         <div className="p-4 md:p-6">
-          {/* Toolbar */}
           <div className="flex items-center justify-between gap-3 mb-5">
             <div>
               <h1 className="font-display font-bold text-xl">Library</h1>
               <p className="text-sm text-muted-foreground">
                 {list.isLoading
-                  ? "Loading…"
+                  ? "Loading\u2026"
                   : `${items.length} instructional${items.length === 1 ? "" : "s"}`}
-                {filters.q && ` for “${filters.q}”`}
+                {filters.q && ` for \u201c${filters.q}\u201d`}
               </p>
             </div>
             <div className="flex items-center gap-2">
@@ -335,12 +345,11 @@ export default function Library() {
                   </span>
                 )}
               </Button>
-              {/* Search input (desktop) */}
               <div className="relative hidden sm:block">
                 <Search className="size-4 absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
                 <input
                   type="search"
-                  placeholder="Search…"
+                  placeholder="Search\u2026"
                   value={filters.q || ""}
                   onChange={(e) => setFilters({ q: e.target.value || undefined })}
                   className="pl-8 pr-3 py-2 rounded-md border border-input bg-background text-sm w-48 focus:outline-none focus:ring-2 focus:ring-ring"
@@ -363,7 +372,6 @@ export default function Library() {
             </div>
           </div>
 
-          {/* Mobile filter drawer */}
           {panelOpen && (
             <div className="lg:hidden mb-4 p-4 border border-border rounded-lg bg-card">
               <div className="flex items-center justify-between mb-3">
@@ -377,12 +385,11 @@ export default function Library() {
                   Close
                 </Button>
               </div>
-              {/* Search input (mobile) */}
               <div className="relative mb-4 sm:hidden">
                 <Search className="size-4 absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
                 <input
                   type="search"
-                  placeholder="Search…"
+                  placeholder="Search\u2026"
                   value={filters.q || ""}
                   onChange={(e) => setFilters({ q: e.target.value || undefined })}
                   className="pl-8 pr-3 py-2 rounded-md border border-input bg-background text-sm w-full focus:outline-none focus:ring-2 focus:ring-ring"
@@ -392,25 +399,22 @@ export default function Library() {
             </div>
           )}
 
-          {/* Active filter chips */}
           {(activeFilterCount > 0 || filters.q) && (
             <div className="flex flex-wrap gap-2 mb-4">
               {filters.q && (
-                <Chip label={`“${filters.q}”`} onClear={() => setFilters({ q: undefined })} />
+                <Chip label={`\u201c${filters.q}\u201d`} onClear={() => setFilters({ q: undefined })} />
               )}
               {filters.techniqueCategoryId &&
-                categories.data
-                  ?.find((c: any) => c.id === filters.techniqueCategoryId)
-                  ? (
-                    <Chip
-                      label={
-                        categories.data.find(
-                          (c: any) => c.id === filters.techniqueCategoryId
-                        ).name
-                      }
-                      onClear={() => setFilters({ techniqueCategoryId: undefined })}
-                    />
-                  ) : null}
+                categories.data?.find((c: any) => c.id === filters.techniqueCategoryId) ? (
+                <Chip
+                  label={
+                    categories.data.find(
+                      (c: any) => c.id === filters.techniqueCategoryId
+                    ).name
+                  }
+                  onClear={() => setFilters({ techniqueCategoryId: undefined })}
+                />
+              ) : null}
               {filters.positionId &&
                 positions.data?.find((p: any) => p.id === filters.positionId) && (
                   <Chip
@@ -448,7 +452,6 @@ export default function Library() {
             </div>
           )}
 
-          {/* Grid */}
           {list.isLoading ? (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
               {Array.from({ length: 8 }).map((_, i) => (
