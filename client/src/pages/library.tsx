@@ -1,7 +1,8 @@
 import { useMemo, useState } from "react";
 import { useLocation } from "wouter";
-import { useQuery } from "@tanstack/react-query";
-import { apiUrl } from "@/lib/queryClient";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { apiRequest, apiUrl } from "@/lib/queryClient";
+import { useToast } from "@/hooks/use-toast";
 import {
   InstructionalCard,
   InstructionalCardSkeleton,
@@ -17,6 +18,10 @@ import {
   Shirt,
   ChevronDown,
   ChevronUp,
+  CheckSquare,
+  Square,
+  Tags,
+  X,
 } from "lucide-react";
 
 const RULESETS = [
@@ -78,12 +83,11 @@ function useFilters(): [Filters, (patch: Partial<Filters>) => void, () => void] 
 
 const SORTS = [
   { value: "recent", label: "Recently added" },
-  { value: "title", label: "Title A–Z" },
+  { value: "title", label: "Title A\u2013Z" },
   { value: "rating", label: "Highest rated" },
   { value: "progress", label: "In progress" },
 ];
 
-// Collapsible filter section
 function FilterSection({
   title,
   defaultOpen = false,
@@ -122,8 +126,16 @@ function FilterSection({
 }
 
 export default function Library() {
+  const qc = useQueryClient();
+  const { toast } = useToast();
   const [filters, setFilters, clearFilters] = useFilters();
   const [panelOpen, setPanelOpen] = useState(false);
+
+  // ---- Bulk tagger state ----
+  const [bulkMode, setBulkMode] = useState(false);
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [bulkTechIds, setBulkTechIds] = useState<number[]>([]);
+  const [bulkPosId, setBulkPosId] = useState<string>("");
 
   const params = new URLSearchParams();
   if (filters.q) params.set("q", filters.q);
@@ -156,6 +168,17 @@ export default function Library() {
   const positionsQs = firstTechId ? `?techniqueCategoryId=${firstTechId}` : "";
   const positions = useQuery({
     queryKey: ["/api/positions", positionsQs],
+    queryFn: async ({ queryKey }) => {
+      const [, qs] = queryKey as [string, string];
+      return (await fetch(apiUrl(`/api/positions${qs}`))).json();
+    },
+  });
+
+  // positions for bulk tagger — scoped to first selected bulk technique
+  const bulkFirstTechId = bulkTechIds[0];
+  const bulkPosQs = bulkFirstTechId ? `?techniqueCategoryId=${bulkFirstTechId}` : "";
+  const bulkPositions = useQuery({
+    queryKey: ["/api/positions", bulkPosQs],
     queryFn: async ({ queryKey }) => {
       const [, qs] = queryKey as [string, string];
       return (await fetch(apiUrl(`/api/positions${qs}`))).json();
@@ -197,9 +220,65 @@ export default function Library() {
 
   const items: any[] = list.data || [];
 
+  // ---- Selection helpers ----
+  const allSelected = items.length > 0 && items.every((it) => selected.has(it.id));
+  const someSelected = !allSelected && items.some((it) => selected.has(it.id));
+
+  const toggleItem = (id: number) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleAll = () => {
+    if (allSelected) {
+      setSelected(new Set());
+    } else {
+      setSelected(new Set(items.map((it) => it.id)));
+    }
+  };
+
+  const exitBulk = () => {
+    setBulkMode(false);
+    setSelected(new Set());
+    setBulkTechIds([]);
+    setBulkPosId("");
+  };
+
+  // ---- Bulk apply mutation ----
+  const bulkMutation = useMutation({
+    mutationFn: async () => {
+      const body: any = { ids: Array.from(selected) };
+      if (bulkTechIds.length > 0) body.techniqueCategoryIds = bulkTechIds;
+      if (bulkPosId) body.positionId = Number(bulkPosId);
+      return apiRequest("PATCH", "/api/instructionals/bulk", body);
+    },
+    onSuccess: async (res) => {
+      const data = await res.json();
+      toast({
+        title: "Updated",
+        description: `Applied tags to ${data.updated} instructional${data.updated === 1 ? "" : "s"}.`,
+      });
+      qc.invalidateQueries({ queryKey: ["/api/instructionals"] });
+      exitBulk();
+    },
+    onError: () => toast({ title: "Bulk update failed", variant: "destructive" }),
+  });
+
+  const canApply = selected.size > 0 && (bulkTechIds.length > 0 || bulkPosId !== "");
+
+  // ---- Toggle bulk tech ----
+  const toggleBulkTech = (id: number) => {
+    setBulkTechIds((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+    );
+    setBulkPosId(""); // reset position when techniques change
+  };
+
   const FilterPanel = (
     <div className="space-y-5">
-      {/* Ruleset — closed by default */}
       <FilterSection title="Ruleset" defaultOpen={false} badge={filters.ruleset ? 1 : 0}>
         <div className="space-y-1">
           {RULESETS.map((r) => (
@@ -221,7 +300,6 @@ export default function Library() {
         </div>
       </FilterSection>
 
-      {/* Technique — open by default */}
       <FilterSection title="Technique" defaultOpen={true} badge={filters.techniqueCategoryIds?.length}>
         <div className="space-y-1">
           {categories.data?.map((c: any) => {
@@ -243,7 +321,6 @@ export default function Library() {
         </div>
       </FilterSection>
 
-      {/* Position — closed by default */}
       <FilterSection title="Position" defaultOpen={false} badge={filters.positionId ? 1 : 0}>
         {positionsByGroup.length === 0 && firstTechId ? (
           <p className="text-xs text-muted-foreground/60 px-2">No positions for this technique.</p>
@@ -280,7 +357,6 @@ export default function Library() {
         )}
       </FilterSection>
 
-      {/* Instructor — closed by default */}
       <FilterSection title="Instructor" defaultOpen={false} badge={filters.instructorId ? 1 : 0}>
         <div className="space-y-0.5">
           {instructors.data?.map((i: any) => (
@@ -300,7 +376,6 @@ export default function Library() {
         </div>
       </FilterSection>
 
-      {/* Tags — closed by default */}
       {tags.data?.length > 0 && (
         <FilterSection title="Tags" defaultOpen={false} badge={filters.tagId ? 1 : 0}>
           <div className="flex flex-wrap gap-1.5">
@@ -323,7 +398,6 @@ export default function Library() {
         </FilterSection>
       )}
 
-      {/* Status — closed by default */}
       <FilterSection title="Status" defaultOpen={false} badge={filters.watched ? 1 : 0}>
         <button
           onClick={() => setFilters({ watched: filters.watched ? undefined : true })}
@@ -364,14 +438,15 @@ export default function Library() {
 
       <div className="flex-1 min-w-0 overflow-y-auto">
         <div className="p-4 md:p-6">
+          {/* Header row */}
           <div className="flex items-center justify-between gap-3 mb-5">
             <div>
               <h1 className="font-display font-bold text-xl">Library</h1>
               <p className="text-sm text-muted-foreground">
                 {list.isLoading
-                  ? "Loading…"
+                  ? "Loading\u2026"
                   : `${items.length} instructional${items.length === 1 ? "" : "s"}`}
-                {filters.q && ` for "${filters.q}"`}
+                {filters.q && ` for \u201c${filters.q}\u201d`}
               </p>
             </div>
             <div className="flex items-center gap-2">
@@ -393,7 +468,7 @@ export default function Library() {
                 <Search className="size-4 absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
                 <input
                   type="search"
-                  placeholder="Search…"
+                  placeholder="Search\u2026"
                   value={filters.q || ""}
                   onChange={(e) => setFilters({ q: e.target.value || undefined })}
                   className="pl-8 pr-3 py-2 rounded-md border border-input bg-background text-sm w-48 focus:outline-none focus:ring-2 focus:ring-ring"
@@ -411,8 +486,103 @@ export default function Library() {
                   ))}
                 </select>
               </div>
+              {/* Bulk mode toggle */}
+              <Button
+                variant={bulkMode ? "default" : "outline"}
+                size="sm"
+                onClick={() => bulkMode ? exitBulk() : setBulkMode(true)}
+                title={bulkMode ? "Exit bulk mode" : "Bulk tag"}
+              >
+                <Tags className="size-4" />
+                <span className="hidden sm:inline">{bulkMode ? "Exit" : "Bulk tag"}</span>
+              </Button>
             </div>
           </div>
+
+          {/* Bulk action bar */}
+          {bulkMode && (
+            <div className="mb-4 rounded-lg border border-primary/30 bg-primary/5 p-3 flex flex-wrap items-start gap-3">
+              {/* Select-all checkbox */}
+              <button
+                onClick={toggleAll}
+                className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors shrink-0 mt-0.5"
+                title={allSelected ? "Deselect all" : "Select all"}
+              >
+                {allSelected ? (
+                  <CheckSquare className="size-4 text-primary" />
+                ) : someSelected ? (
+                  <span className="size-4 rounded border-2 border-primary flex items-center justify-center">
+                    <span className="size-1.5 rounded-sm bg-primary" />
+                  </span>
+                ) : (
+                  <Square className="size-4" />
+                )}
+                <span className="font-medium">
+                  {selected.size > 0 ? `${selected.size} selected` : "Select all"}
+                </span>
+              </button>
+
+              <div className="flex-1 flex flex-wrap items-end gap-3">
+                {/* Technique multi-select */}
+                <div className="space-y-1">
+                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-mono">Technique</div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {categories.data?.map((c: any) => {
+                      const active = bulkTechIds.includes(c.id);
+                      return (
+                        <button
+                          key={c.id}
+                          onClick={() => toggleBulkTech(c.id)}
+                          className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border transition-colors ${
+                            active
+                              ? "border-primary bg-primary/10 text-primary"
+                              : "border-border bg-background hover:bg-muted text-foreground"
+                          }`}
+                        >
+                          <span
+                            className="size-2 rounded-full shrink-0"
+                            style={{ backgroundColor: c.color }}
+                          />
+                          {c.name}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Position select — only shows when at least one technique is picked */}
+                {bulkTechIds.length > 0 && (
+                  <div className="space-y-1">
+                    <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-mono">Position</div>
+                    <select
+                      value={bulkPosId}
+                      onChange={(e) => setBulkPosId(e.target.value)}
+                      className="h-8 rounded-md border border-input bg-background px-2 text-sm w-44"
+                    >
+                      <option value="">None</option>
+                      {bulkPositions.data?.map((p: any) => (
+                        <option key={p.id} value={p.id}>{p.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
+                {/* Apply + cancel */}
+                <div className="flex items-end gap-2 ml-auto">
+                  <Button
+                    size="sm"
+                    disabled={!canApply || bulkMutation.isPending}
+                    onClick={() => bulkMutation.mutate()}
+                  >
+                    {bulkMutation.isPending ? "Applying\u2026" : `Apply to ${selected.size}`}
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={exitBulk}>
+                    <X className="size-4" />
+                  </Button>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Mobile filter drawer */}
           {panelOpen && (
@@ -427,7 +597,7 @@ export default function Library() {
                 <Search className="size-4 absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
                 <input
                   type="search"
-                  placeholder="Search…"
+                  placeholder="Search\u2026"
                   value={filters.q || ""}
                   onChange={(e) => setFilters({ q: e.target.value || undefined })}
                   className="pl-8 pr-3 py-2 rounded-md border border-input bg-background text-sm w-full focus:outline-none focus:ring-2 focus:ring-ring"
@@ -441,7 +611,7 @@ export default function Library() {
           {(activeFilterCount > 0 || filters.q) && (
             <div className="flex flex-wrap gap-2 mb-4">
               {filters.q && (
-                <Chip label={`"${filters.q}"`} onClear={() => setFilters({ q: undefined })} />
+                <Chip label={`\u201c${filters.q}\u201d`} onClear={() => setFilters({ q: undefined })} />
               )}
               {filters.techniqueCategoryIds?.map((id) => {
                 const cat = categories.data?.find((c: any) => c.id === id);
@@ -497,10 +667,75 @@ export default function Library() {
             <EmptyLibrary />
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-              {items.map((item: any) => <InstructionalCard key={item.id} item={item} />)}
+              {items.map((item: any) => (
+                <SelectableCard
+                  key={item.id}
+                  item={item}
+                  bulkMode={bulkMode}
+                  selected={selected.has(item.id)}
+                  onToggle={toggleItem}
+                />
+              ))}
             </div>
           )}
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ---- SelectableCard wrapper ----
+function SelectableCard({
+  item,
+  bulkMode,
+  selected,
+  onToggle,
+}: {
+  item: any;
+  bulkMode: boolean;
+  selected: boolean;
+  onToggle: (id: number) => void;
+}) {
+  if (!bulkMode) return <InstructionalCard item={item} />;
+
+  return (
+    <div
+      onClick={() => onToggle(item.id)}
+      className={`relative rounded-lg cursor-pointer transition-all duration-150 ${
+        selected
+          ? "ring-2 ring-primary ring-offset-2 ring-offset-background"
+          : "ring-1 ring-border hover:ring-primary/40"
+      }`}
+    >
+      {/* Tint overlay when selected */}
+      {selected && (
+        <div className="absolute inset-0 rounded-lg bg-primary/8 pointer-events-none z-10" />
+      )}
+
+      {/* Checkbox badge top-left */}
+      <div className="absolute top-2 left-2 z-20">
+        <div
+          className={`size-6 rounded-full flex items-center justify-center shadow-sm transition-colors ${
+            selected
+              ? "bg-primary text-primary-foreground"
+              : "bg-background/80 border border-border text-muted-foreground"
+          }`}
+        >
+          {selected ? (
+            <svg viewBox="0 0 12 12" className="size-3.5 fill-current">
+              <polyline points="1.5,6 4.5,9 10.5,3" stroke="currentColor" strokeWidth="1.8" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          ) : (
+            <svg viewBox="0 0 12 12" className="size-3 fill-none stroke-current" strokeWidth="1.5">
+              <circle cx="6" cy="6" r="4" />
+            </svg>
+          )}
+        </div>
+      </div>
+
+      {/* Card rendered underneath — pointer-events disabled so clicks bubble to wrapper */}
+      <div className="pointer-events-none">
+        <InstructionalCard item={item} />
       </div>
     </div>
   );

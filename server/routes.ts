@@ -41,7 +41,6 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     const filter: any = {};
     if (q) filter.q = String(q);
     if (instructorId) filter.instructorId = Number(instructorId);
-    // Accept comma-separated IDs: ?techniqueCategoryIds=1,3 or repeated: ?techniqueCategoryIds=1&techniqueCategoryIds=3
     if (techniqueCategoryIds) {
       const raw = Array.isArray(techniqueCategoryIds)
         ? (techniqueCategoryIds as string[])
@@ -93,6 +92,36 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       storage.setInstructionalTags(id, req.body.tagIds.map(Number));
     }
     res.json(storage.getInstructional(id));
+  });
+
+  // ===== Bulk update =====
+  // PATCH /api/instructionals/bulk
+  // Body: { ids: number[], positionId?: number | null, techniqueCategoryIds?: number[] }
+  // Applies the given fields to every listed instructional.
+  // Fields omitted from the body are left untouched.
+  app.patch("/api/instructionals/bulk", (req, res) => {
+    const { ids, positionId, techniqueCategoryIds } = req.body;
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ message: "ids must be a non-empty array" });
+    }
+    const validIds = ids.map(Number).filter((n) => !isNaN(n) && n > 0);
+    const patch: any = {};
+    if (positionId !== undefined) patch.positionId = positionId === null ? null : Number(positionId);
+
+    let updated = 0;
+    for (const id of validIds) {
+      if (Object.keys(patch).length > 0) {
+        const result = storage.updateInstructional(id, patch);
+        if (result) updated++;
+      } else {
+        updated++;
+      }
+      if (Array.isArray(techniqueCategoryIds)) {
+        storage.setInstructionalTechniqueCategories(id, techniqueCategoryIds.map(Number));
+      }
+    }
+
+    res.json({ updated });
   });
 
   app.delete("/api/instructionals/:id", (req, res) => {
@@ -237,7 +266,6 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
 
   // ===== Positions =====
-  // Accepts optional ?techniqueCategoryId=N for dependent dropdown in the UI.
   app.get("/api/positions", (req, res) => {
     const techniqueCategoryId = req.query.techniqueCategoryId
       ? Number(req.query.techniqueCategoryId)
