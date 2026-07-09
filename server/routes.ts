@@ -57,12 +57,6 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     res.json(storage.listInstructionals(filter));
   });
 
-  app.get("/api/instructionals/:id", (req, res) => {
-    const item = storage.getInstructional(Number(req.params.id));
-    if (!item) return res.status(404).json({ message: "Not found" });
-    res.json(item);
-  });
-
   app.post("/api/instructionals", (req, res) => {
     const parsed = insertInstructionalSchema.safeParse(req.body);
     if (!parsed.success)
@@ -78,27 +72,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     res.json(storage.getInstructional(created.id));
   });
 
-  app.patch("/api/instructionals/:id", (req, res) => {
-    const id = Number(req.params.id);
-    const parsed = updateInstructionalSchema.safeParse(req.body);
-    if (!parsed.success)
-      return res.status(400).json({ message: "Invalid", errors: parsed.error.flatten() });
-    const payload: any = { ...parsed.data };
-    if (Array.isArray(req.body.videos)) payload.videos = req.body.videos;
-    if (Array.isArray(req.body.techniqueCategoryIds)) payload.techniqueCategoryIds = req.body.techniqueCategoryIds.map(Number);
-    const updated = storage.updateInstructional(id, payload);
-    if (!updated) return res.status(404).json({ message: "Not found" });
-    if (Array.isArray(req.body.tagIds)) {
-      storage.setInstructionalTags(id, req.body.tagIds.map(Number));
-    }
-    res.json(storage.getInstructional(id));
-  });
-
-  // ===== Bulk update =====
+  // ===== Bulk update — MUST be before /:id to prevent wildcard capture =====
   // PATCH /api/instructionals/bulk
   // Body: { ids: number[], positionId?: number | null, techniqueCategoryIds?: number[] }
-  // Applies the given fields to every listed instructional.
-  // Fields omitted from the body are left untouched.
   app.patch("/api/instructionals/bulk", (req, res) => {
     const { ids, positionId, techniqueCategoryIds } = req.body;
     if (!Array.isArray(ids) || ids.length === 0) {
@@ -122,6 +98,28 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
 
     res.json({ updated });
+  });
+
+  app.get("/api/instructionals/:id", (req, res) => {
+    const item = storage.getInstructional(Number(req.params.id));
+    if (!item) return res.status(404).json({ message: "Not found" });
+    res.json(item);
+  });
+
+  app.patch("/api/instructionals/:id", (req, res) => {
+    const id = Number(req.params.id);
+    const parsed = updateInstructionalSchema.safeParse(req.body);
+    if (!parsed.success)
+      return res.status(400).json({ message: "Invalid", errors: parsed.error.flatten() });
+    const payload: any = { ...parsed.data };
+    if (Array.isArray(req.body.videos)) payload.videos = req.body.videos;
+    if (Array.isArray(req.body.techniqueCategoryIds)) payload.techniqueCategoryIds = req.body.techniqueCategoryIds.map(Number);
+    const updated = storage.updateInstructional(id, payload);
+    if (!updated) return res.status(404).json({ message: "Not found" });
+    if (Array.isArray(req.body.tagIds)) {
+      storage.setInstructionalTags(id, req.body.tagIds.map(Number));
+    }
+    res.json(storage.getInstructional(id));
   });
 
   app.delete("/api/instructionals/:id", (req, res) => {
