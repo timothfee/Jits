@@ -16,7 +16,7 @@ export default function Settings() {
   const qc = useQueryClient();
   const { toast } = useToast();
   const [newCat, setNewCat] = useState({ name: "", color: "#3b82f6" });
-  const [newPos, setNewPos] = useState({ name: "", group: "Other" });
+  const [newPos, setNewPos] = useState({ name: "", group: "Other", techniqueCategoryId: "" });
   const [newTag, setNewTag] = useState("");
   const [scanResult, setScanResult] = useState<any>(null);
   const [thumbResult, setThumbResult] = useState<any>(null);
@@ -52,7 +52,7 @@ export default function Settings() {
       } else {
         toast({
           title: "Scan complete",
-          description: `Added ${data.added} • Updated ${data.updated} • Instructors inferred ${data.inferred ?? 0} • Missing ${data.missing}`,
+          description: `Added ${data.added} \u2022 Updated ${data.updated} \u2022 Instructors inferred ${data.inferred ?? 0} \u2022 Missing ${data.missing}`,
         });
       }
       qc.invalidateQueries({ queryKey: ["/api/instructionals"] });
@@ -68,7 +68,7 @@ export default function Settings() {
       setThumbResult(data);
       toast({
         title: "Thumbnails generated",
-        description: `Generated ${data.generated} • Failed ${data.failed} • Skipped ${data.skipped}`,
+        description: `Generated ${data.generated} \u2022 Failed ${data.failed} \u2022 Skipped ${data.skipped}`,
       });
       qc.invalidateQueries({ queryKey: ["/api/instructionals"] });
     },
@@ -96,7 +96,7 @@ export default function Settings() {
     mutationFn: (data: any) => apiRequest("POST", "/api/positions", data),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["/api/positions"] });
-      setNewPos({ name: "", group: "Other" });
+      setNewPos({ name: "", group: "Other", techniqueCategoryId: "" });
     },
   });
   const delPos = useMutation({
@@ -112,6 +112,9 @@ export default function Settings() {
     mutationFn: (id: number) => apiRequest("DELETE", `/api/tags/${id}`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["/api/tags"] }),
   });
+
+  // Map category id -> name for display in positions list
+  const catById = new Map<number, any>((categories.data ?? []).map((c: any) => [c.id, c]));
 
   return (
     <div className="p-4 md:p-6 max-w-4xl mx-auto">
@@ -161,7 +164,7 @@ export default function Settings() {
               disabled={scanMutation.isPending}
             >
               <ScanLine className="size-4" />
-              {scanMutation.isPending ? "Scanning…" : "Scan now"}
+              {scanMutation.isPending ? "Scanning\u2026" : "Scan now"}
             </Button>
             {scanResult?.error ? (
               <span className="text-xs text-destructive font-mono">
@@ -169,14 +172,14 @@ export default function Settings() {
               </span>
             ) : scanResult ? (
               <span className="text-xs text-muted-foreground font-mono">
-                scanned {scanResult.scanned} · added {scanResult.added} ·
-                updated {scanResult.updated} · inferred {scanResult.inferred ?? 0} ·
+                scanned {scanResult.scanned} \u00b7 added {scanResult.added} \u00b7
+                updated {scanResult.updated} \u00b7 inferred {scanResult.inferred ?? 0} \u00b7
                 missing {scanResult.missing}
               </span>
             ) : null}
             {scanResult?.warnings && scanResult.warnings.length > 0 && (
               <span className="text-xs text-amber-500 dark:text-amber-400 font-mono">
-                {scanResult.warnings.length} folder(s) skipped — see container logs
+                {scanResult.warnings.length} folder(s) skipped \u2014 see container logs
               </span>
             )}
           </div>
@@ -188,12 +191,12 @@ export default function Settings() {
               disabled={thumbMutation.isPending}
             >
               <ImageIcon className="size-4" />
-              {thumbMutation.isPending ? "Generating…" : "Generate thumbnails"}
+              {thumbMutation.isPending ? "Generating\u2026" : "Generate thumbnails"}
             </Button>
             {thumbResult && (
               <span className="text-xs text-muted-foreground font-mono">
-                generated {thumbResult.generated} · failed {thumbResult.failed}
-                · skipped {thumbResult.skipped}
+                generated {thumbResult.generated} \u00b7 failed {thumbResult.failed}
+                \u00b7 skipped {thumbResult.skipped}
               </span>
             )}
             <p className="text-xs text-muted-foreground basis-full">
@@ -277,25 +280,36 @@ export default function Settings() {
         </CardHeader>
         <CardContent className="space-y-3">
           <div className="flex flex-wrap gap-2">
-            {positions.data?.map((p: any) => (
-              <div
-                key={p.id}
-                className="inline-flex items-center gap-2 rounded-md border border-border px-2.5 py-1 text-sm"
-              >
-                <span className="text-[10px] text-muted-foreground font-mono uppercase">
-                  {p.group}
-                </span>
-                {p.name}
-                <button
-                  onClick={() => delPos.mutate(p.id)}
-                  className="text-muted-foreground hover:text-destructive"
+            {positions.data?.map((p: any) => {
+              const linkedCat = p.techniqueCategoryId ? catById.get(p.techniqueCategoryId) : null;
+              return (
+                <div
+                  key={p.id}
+                  className="inline-flex items-center gap-2 rounded-md border border-border px-2.5 py-1 text-sm"
                 >
-                  <Trash2 className="size-3" />
-                </button>
-              </div>
-            ))}
+                  <span className="text-[10px] text-muted-foreground font-mono uppercase">
+                    {p.group}
+                  </span>
+                  {p.name}
+                  {linkedCat && (
+                    <span
+                      className="text-[10px] px-1.5 py-0.5 rounded-full font-mono"
+                      style={{ backgroundColor: linkedCat.color + "33", color: linkedCat.color }}
+                    >
+                      {linkedCat.name}
+                    </span>
+                  )}
+                  <button
+                    onClick={() => delPos.mutate(p.id)}
+                    className="text-muted-foreground hover:text-destructive"
+                  >
+                    <Trash2 className="size-3" />
+                  </button>
+                </div>
+              );
+            })}
           </div>
-          <div className="flex items-end gap-2">
+          <div className="flex flex-wrap items-end gap-2">
             <div className="space-y-1">
               <label className="text-xs text-muted-foreground">Name</label>
               <Input
@@ -313,9 +327,29 @@ export default function Settings() {
                 className="w-32"
               />
             </div>
+            <div className="space-y-1">
+              <label className="text-xs text-muted-foreground">Technique</label>
+              <select
+                value={newPos.techniqueCategoryId}
+                onChange={(e) => setNewPos((p) => ({ ...p, techniqueCategoryId: e.target.value }))}
+                className="h-9 rounded-md border border-input bg-background px-2 text-sm w-36"
+              >
+                <option value="">None</option>
+                {categories.data?.map((c: any) => (
+                  <option key={c.id} value={c.id}>{c.name}</option>
+                ))}
+              </select>
+            </div>
             <Button
               variant="outline"
-              onClick={() => newPos.name.trim() && addPos.mutate(newPos)}
+              onClick={() => {
+                if (!newPos.name.trim()) return;
+                const payload: any = { name: newPos.name.trim(), group: newPos.group };
+                if (newPos.techniqueCategoryId) {
+                  payload.techniqueCategoryId = Number(newPos.techniqueCategoryId);
+                }
+                addPos.mutate(payload);
+              }}
             >
               <Plus className="size-4" />
               Add
@@ -363,7 +397,7 @@ export default function Settings() {
                   addTag.mutate(newTag.trim());
                 }
               }}
-              placeholder="Add a tag…"
+              placeholder="Add a tag\u2026"
               className="max-w-xs"
             />
             <Button
@@ -385,13 +419,13 @@ function Stat({ label, value }: { label: string; value?: any }) {
       <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-mono">
         {label}
       </div>
-      <div className="font-display font-bold text-lg">{value ?? "—"}</div>
+      <div className="font-display font-bold text-lg">{value ?? "\u2014"}</div>
     </div>
   );
 }
 
 function fmtHours(seconds?: number) {
-  if (!seconds) return "—";
+  if (!seconds) return "\u2014";
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
   if (h > 0) return `${h}h ${m}m`;
