@@ -74,15 +74,21 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   // ===== Bulk update — MUST be before /:id to prevent wildcard capture =====
   // PATCH /api/instructionals/bulk
-  // Body: { ids: number[], positionId?: number | null, techniqueCategoryIds?: number[] }
+  // Body: { ids: number[], positionId?: number | null, techniqueCategoryIds?: number[], ruleset?: string }
+  // Fields omitted from the body are left untouched.
+  const VALID_RULESETS = new Set(["gi", "nogi", "both"]);
   app.patch("/api/instructionals/bulk", (req, res) => {
-    const { ids, positionId, techniqueCategoryIds } = req.body;
+    const { ids, positionId, techniqueCategoryIds, ruleset } = req.body;
     if (!Array.isArray(ids) || ids.length === 0) {
       return res.status(400).json({ message: "ids must be a non-empty array" });
+    }
+    if (ruleset !== undefined && !VALID_RULESETS.has(ruleset)) {
+      return res.status(400).json({ message: "ruleset must be gi, nogi, or both" });
     }
     const validIds = ids.map(Number).filter((n) => !isNaN(n) && n > 0);
     const patch: any = {};
     if (positionId !== undefined) patch.positionId = positionId === null ? null : Number(positionId);
+    if (ruleset !== undefined) patch.ruleset = ruleset;
 
     let updated = 0;
     for (const id of validIds) {

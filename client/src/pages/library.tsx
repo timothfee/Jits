@@ -30,6 +30,8 @@ const RULESETS = [
   { value: "both", label: "Both" },
 ] as const;
 
+type RulesetValue = typeof RULESETS[number]["value"];
+
 type Filters = {
   q?: string;
   instructorId?: number;
@@ -136,6 +138,7 @@ export default function Library() {
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [bulkTechIds, setBulkTechIds] = useState<number[]>([]);
   const [bulkPosId, setBulkPosId] = useState<string>("");
+  const [bulkRuleset, setBulkRuleset] = useState<RulesetValue | "">("");
 
   const params = new URLSearchParams();
   if (filters.q) params.set("q", filters.q);
@@ -245,6 +248,7 @@ export default function Library() {
     setSelected(new Set());
     setBulkTechIds([]);
     setBulkPosId("");
+    setBulkRuleset("");
   };
 
   // ---- Bulk apply mutation ----
@@ -253,6 +257,7 @@ export default function Library() {
       const body: any = { ids: Array.from(selected) };
       if (bulkTechIds.length > 0) body.techniqueCategoryIds = bulkTechIds;
       if (bulkPosId) body.positionId = Number(bulkPosId);
+      if (bulkRuleset) body.ruleset = bulkRuleset;
       return apiRequest("PATCH", "/api/instructionals/bulk", body);
     },
     onSuccess: async (res) => {
@@ -267,7 +272,8 @@ export default function Library() {
     onError: () => toast({ title: "Bulk update failed", variant: "destructive" }),
   });
 
-  const canApply = selected.size > 0 && (bulkTechIds.length > 0 || bulkPosId !== "");
+  const canApply =
+    selected.size > 0 && (bulkTechIds.length > 0 || bulkPosId !== "" || bulkRuleset !== "");
 
   // ---- Toggle bulk tech ----
   const toggleBulkTech = (id: number) => {
@@ -523,6 +529,27 @@ export default function Library() {
               </button>
 
               <div className="flex-1 flex flex-wrap items-end gap-3">
+                {/* Ruleset pills */}
+                <div className="space-y-1">
+                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-mono">Ruleset</div>
+                  <div className="flex gap-1.5">
+                    {RULESETS.map((r) => (
+                      <button
+                        key={r.value}
+                        onClick={() => setBulkRuleset((prev) => prev === r.value ? "" : r.value)}
+                        className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border transition-colors ${
+                          bulkRuleset === r.value
+                            ? "border-primary bg-primary/10 text-primary"
+                            : "border-border bg-background hover:bg-muted text-foreground"
+                        }`}
+                      >
+                        <Shirt className="size-3 shrink-0" />
+                        {r.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
                 {/* Technique multi-select */}
                 <div className="space-y-1">
                   <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-mono">Technique</div>
@@ -707,12 +734,9 @@ function SelectableCard({
           : "ring-1 ring-border hover:ring-primary/40"
       }`}
     >
-      {/* Tint overlay when selected */}
       {selected && (
         <div className="absolute inset-0 rounded-lg bg-primary/8 pointer-events-none z-10" />
       )}
-
-      {/* Checkbox badge top-left */}
       <div className="absolute top-2 left-2 z-20">
         <div
           className={`size-6 rounded-full flex items-center justify-center shadow-sm transition-colors ${
@@ -732,8 +756,6 @@ function SelectableCard({
           )}
         </div>
       </div>
-
-      {/* Card rendered underneath — pointer-events disabled so clicks bubble to wrapper */}
       <div className="pointer-events-none">
         <InstructionalCard item={item} />
       </div>
