@@ -1,11 +1,30 @@
+# Build artifacts & deps (rebuilt inside the image)
 node_modules
 dist
+
+# Local runtime data (must not be baked into the image)
 data
 media
 *.db
 *.db-*
+
+# VCS & editor
 .git
 .gitignore
+.gitattributes
+
+# Docs & env (not needed in image; env is provided at runtime)
 *.md
 .env*
+.env.example
+
+# Local dev / QA artifacts
+.qa-*.png
+*.log
+npm-debug.log*
+
+# Misc
 migrations
+.vscode
+.idea
+.DS_Store

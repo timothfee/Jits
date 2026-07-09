@@ -1,5 +1,8 @@
 # Jits Library — self-hosted BJJ instructional organizer
 # -------------------------------------------------------
+# 1. Edit the media volume path below to point at your instructionals folder.
+# 2. `docker compose up -d --build`
+# 3. Open http://localhost:5000 → Scan library → Generate thumbnails.
 services:
   jits-library:
     build: .
@@ -9,9 +12,10 @@ services:
     ports:
       - "5000:5000"
     volumes:
-      # Mount your instructional videos here (read-only is fine)
+      # Your instructional videos (read-only — the app never writes here).
+      # Change the left side to your host folder, e.g. /home/you/Videos/BJJ:/media:ro
       - /path/to/your/instructionals:/media:ro
-      # Persistent DB + generated assets
+      # Persistent DB + generated thumbnails (survives rebuilds).
       - jits-data:/data
     environment:
       # Where the app looks for video files
@@ -22,9 +26,12 @@ services:
       - THUMBNAIL_DIR=/data/thumbnails
       # Web server port (inside container)
       - PORT=5000
+      # Optional: populate 5 sample instructionals on first run (for trying the UI)
+      # - DEMO_SEED=true
+      # Optional: also generate thumbnails for remote http(s) video URLs
+      # - ALLOW_REMOTE_THUMBNAILS=true
       # Optional: override the timezone for timestamps
       - TZ=America/Chicago
-    # Optional GPU/media passthrough can be added here
 
 volumes:
   jits-data:
