@@ -26,10 +26,9 @@ ENV NODE_ENV=production \
     THUMBNAIL_DIR=/data/thumbnails
 
 # ffmpeg (thumbnail generation), tini (PID 1 signal handling / graceful
-# shutdown), ca-certificates (HTTPS for optional remote-thumbnail fetch),
-# su-exec (lightweight privilege drop in entrypoint).
+# shutdown), ca-certificates (HTTPS), gosu (privilege drop in entrypoint).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ffmpeg tini ca-certificates su-exec \
+    ffmpeg tini ca-certificates gosu \
     && rm -rf /var/lib/apt/lists/*
 
 # Non-root user (entrypoint drops to this after fixing volume ownership).
