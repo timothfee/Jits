@@ -41,9 +41,9 @@ COPY --from=builder --chown=app:app /app/package.json /app/package-lock.json ./
 COPY --from=builder --chown=app:app /app/node_modules ./node_modules
 COPY --from=builder --chown=app:app /app/dist ./dist
 
-# Entrypoint script (runs as root, fixes /data /media perms, drops to app).
-COPY --chown=root:root entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+# Write entrypoint inline so there is no external file to COPY.
+RUN printf '#!/bin/sh\nset -e\nchown -R 1001:1001 /data /media 2>/dev/null || true\nexec gosu app "$@"\n' > /entrypoint.sh \
+    && chmod +x /entrypoint.sh
 
 # /media is bind-mounted at runtime; /data holds the DB + thumbnails.
 VOLUME ["/media", "/data"]
