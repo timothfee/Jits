@@ -57,6 +57,8 @@ const RULESET_DISPLAY: Record<string, { label: string; cls: string }> = {
   both: { label: "Gi + No-Gi", cls: "bg-purple-500/15 text-purple-400" },
 };
 
+const PLAYBACK_RATES = [0.5, 0.75, 1, 1.25, 1.5, 2];
+
 export default function InstructionalDetail() {
   const { id } = useParams();
   const numId = Number(id);
@@ -66,6 +68,7 @@ export default function InstructionalDetail() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [currentVideoId, setCurrentVideoId] = useState<number | null>(null);
   const [autoAdvance, setAutoAdvance] = useState(false);
+  const [playbackRate, setPlaybackRate] = useState(1);
 
   const item = useQuery({
     queryKey: ["/api/instructionals", numId],
@@ -94,6 +97,12 @@ export default function InstructionalDetail() {
     setCurrentVideoId(initialVideoId);
     setAutoAdvance(false);
   }, [item.data?.id, initialVideoId]);
+
+  useEffect(() => {
+    if (videoRef.current) {
+      videoRef.current.playbackRate = playbackRate;
+    }
+  }, [playbackRate, currentVideoId]);
 
   const currentVideo = videos.find((v) => v.id === currentVideoId) ?? videos[0] ?? null;
   const currentIndex = currentVideo ? videos.findIndex((v) => v.id === currentVideo.id) : -1;
@@ -140,6 +149,7 @@ export default function InstructionalDetail() {
     if (item.data.progressVideoId === currentVideo.id && item.data.progress > 5) {
       v.currentTime = item.data.progress;
     }
+    v.playbackRate = playbackRate;
   };
 
   const onEnded = () => {
@@ -190,7 +200,7 @@ export default function InstructionalDetail() {
       </Link>
 
       {/* Player */}
-      <div className="rounded-lg overflow-hidden border border-card-border bg-black mb-6">
+      <div className="rounded-lg overflow-hidden border border-card-border bg-black mb-3 w-full">
         {currentVideo ? (
           <video
             ref={videoRef}
@@ -198,7 +208,7 @@ export default function InstructionalDetail() {
             src={apiUrl(`/api/videos/${currentVideo.id}/stream`)}
             controls
             autoPlay={autoAdvance}
-            className="w-full aspect-video"
+            className="w-full max-h-[75vh] object-contain bg-black"
             onTimeUpdate={onTimeUpdate}
             onLoadedMetadata={onLoadedMetadata}
             onEnded={onEnded}
@@ -210,6 +220,24 @@ export default function InstructionalDetail() {
             No playable video parts.
           </div>
         )}
+      </div>
+
+      {/* Playback Speed */}
+      <div className="flex items-center gap-2 mb-6">
+        <span className="text-xs text-muted-foreground">Speed</span>
+        {PLAYBACK_RATES.map((rate) => (
+          <button
+            key={rate}
+            onClick={() => setPlaybackRate(rate)}
+            className={`px-2.5 py-1 rounded text-xs font-mono font-medium border transition-colors ${
+              playbackRate === rate
+                ? "bg-primary text-primary-foreground border-primary"
+                : "border-border bg-muted hover:bg-muted/70 text-muted-foreground"
+            }`}
+          >
+            {rate}×
+          </button>
+        ))}
       </div>
 
       {/* Header */}
