@@ -1,4 +1,4 @@
-import { hexToRgba, contrastColor } from "@/lib/format";
+import { hexToRgba } from "@/lib/format";
 import type { TechniqueCategory } from "@shared/schema";
 
 export function TechniqueBadge({
@@ -10,7 +10,6 @@ export function TechniqueBadge({
 }) {
   if (!category) return null;
   const color = category.color || "#64748b";
-  const text = contrastColor(color);
   const pad = size === "sm" ? "px-1.5 py-0.5 text-[10px]" : "px-2 py-0.5 text-xs";
   return (
     <span
@@ -21,7 +20,7 @@ export function TechniqueBadge({
         className="size-1.5 rounded-full"
         style={{ backgroundColor: color }}
       />
-      <span style={{ color: text === "#ffffff" ? color : color }}>{category.name}</span>
+      <span>{category.name}</span>
     </span>
   );
 }

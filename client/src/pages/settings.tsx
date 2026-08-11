@@ -152,14 +152,14 @@ export default function Settings() {
               <span className="text-xs text-destructive font-mono">{scanResult.error}</span>
             ) : scanResult ? (
               <span className="text-xs text-muted-foreground font-mono">
-                scanned {scanResult.scanned} \u00b7 added {scanResult.added} \u00b7 updated{" "}
-                {scanResult.updated} \u00b7 inferred {scanResult.inferred ?? 0} \u00b7 missing{" "}
+                scanned {scanResult.scanned} · added {scanResult.added} · updated{" "}
+                {scanResult.updated} · inferred {scanResult.inferred ?? 0} · missing{" "}
                 {scanResult.missing}
               </span>
             ) : null}
             {scanResult?.warnings?.length > 0 && (
               <span className="text-xs text-amber-500 dark:text-amber-400 font-mono">
-                {scanResult.warnings.length} folder(s) skipped \u2014 see container logs
+                {scanResult.warnings.length} folder(s) skipped — see container logs
               </span>
             )}
           </div>
@@ -171,7 +171,7 @@ export default function Settings() {
             </Button>
             {thumbResult && (
               <span className="text-xs text-muted-foreground font-mono">
-                generated {thumbResult.generated} \u00b7 failed {thumbResult.failed} \u00b7 skipped{" "}
+                generated {thumbResult.generated} · failed {thumbResult.failed} · skipped{" "}
                 {thumbResult.skipped}
               </span>
             )}
