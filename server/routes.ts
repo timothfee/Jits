@@ -173,7 +173,12 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     if (!file) return res.status(404).json({ message: "No thumbnail" });
     res.setHeader("Content-Type", "image/jpeg");
     res.setHeader("Cache-Control", "public, max-age=604800, immutable");
-    fs.createReadStream(file).pipe(res);
+    const stream = fs.createReadStream(file);
+    stream.on("error", () => {
+      if (!res.headersSent) res.status(500).json({ message: "Failed to read thumbnail" });
+      else res.destroy();
+    });
+    stream.pipe(res);
   });
 
   app.post("/api/instructionals/:id/thumbnail", async (req, res) => {
@@ -221,13 +226,33 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     const stat = fs.statSync(resolved);
     const fileSize = stat.size;
     const contentType = videoMimeType(part.filePath);
+    const onStreamError = (stream: fs.ReadStream) => {
+      stream.on("error", () => {
+        if (!res.headersSent) res.status(500).json({ message: "Failed to read file" });
+        else res.destroy();
+      });
+    };
     const range = req.headers.range;
     if (range) {
       const rangeParts = range.replace(/bytes=/, "").split("-");
-      const start = parseInt(rangeParts[0], 10);
-      const end = rangeParts[1] ? parseInt(rangeParts[1], 10) : fileSize - 1;
+      let start: number;
+      let end: number;
+      if (rangeParts[0] === "") {
+        // Suffix range: "bytes=-500" means the last 500 bytes.
+        const suffixLength = parseInt(rangeParts[1], 10);
+        start = Math.max(fileSize - suffixLength, 0);
+        end = fileSize - 1;
+      } else {
+        start = parseInt(rangeParts[0], 10);
+        end = rangeParts[1] ? parseInt(rangeParts[1], 10) : fileSize - 1;
+      }
+      if (isNaN(start) || isNaN(end) || start > end || start < 0 || end >= fileSize) {
+        res.writeHead(416, { "Content-Range": `bytes */${fileSize}` });
+        return res.end();
+      }
       const chunkSize = end - start + 1;
       const stream = fs.createReadStream(resolved, { start, end });
+      onStreamError(stream);
       res.writeHead(206, {
         "Content-Range": `bytes ${start}-${end}/${fileSize}`,
         "Accept-Ranges": "bytes",
@@ -236,12 +261,14 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       });
       stream.pipe(res);
     } else {
+      const stream = fs.createReadStream(resolved);
+      onStreamError(stream);
       res.writeHead(200, {
         "Content-Length": fileSize,
         "Content-Type": contentType,
         "Accept-Ranges": "bytes",
       });
-      fs.createReadStream(resolved).pipe(res);
+      stream.pipe(res);
     }
   });
 

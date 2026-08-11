@@ -208,7 +208,7 @@ export default function InstructionalDetail() {
             src={apiUrl(`/api/videos/${currentVideo.id}/stream`)}
             controls
             autoPlay={autoAdvance}
-            className="w-full max-h-[75vh] object-contain bg-black"
+            className="w-full aspect-video max-h-[75vh] object-contain bg-black"
             onTimeUpdate={onTimeUpdate}
             onLoadedMetadata={onLoadedMetadata}
             onEnded={onEnded}

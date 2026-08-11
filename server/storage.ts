@@ -214,7 +214,7 @@ function initDb() {
       available INTEGER NOT NULL DEFAULT 1,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
-      FOREIGN KEY (instructor_id) REFERENCES instructors(id) ON DELETE CASCADE,
+      FOREIGN KEY (instructor_id) REFERENCES instructors(id) ON DELETE SET NULL,
       FOREIGN KEY (position_id) REFERENCES positions(id) ON DELETE SET NULL,
       FOREIGN KEY (technique_category_id) REFERENCES technique_categories(id) ON DELETE SET NULL
     );
@@ -256,6 +256,59 @@ function initDb() {
 function hasColumn(table: string, col: string): boolean {
   const rows = sqlite.prepare(`PRAGMA table_info(${table})`).all() as any[];
   return rows.some((r) => r.name === col);
+}
+
+// Deleting an instructor should orphan its instructionals (like position/category),
+// not cascade-delete them. Older databases were created with ON DELETE CASCADE on
+// instructor_id; SQLite can't ALTER a foreign key in place, so rebuild the table.
+function fixInstructorCascade() {
+  const fks = sqlite.prepare(`PRAGMA foreign_key_list(instructionals)`).all() as any[];
+  const instructorFk = fks.find((fk) => fk.table === "instructors");
+  if (!instructorFk || instructorFk.on_delete !== "CASCADE") return;
+
+  const wasForeignKeysOn = (sqlite.pragma("foreign_keys", { simple: true }) as number) === 1;
+  sqlite.pragma("foreign_keys = OFF");
+  const rebuild = sqlite.transaction(() => {
+    sqlite.exec(`
+      CREATE TABLE instructionals_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL,
+        description TEXT,
+        instructor_id INTEGER,
+        position_id INTEGER,
+        technique_category_id INTEGER,
+        ruleset TEXT DEFAULT 'unknown',
+        folder_path TEXT,
+        duration INTEGER,
+        thumbnail TEXT,
+        notes TEXT,
+        rating INTEGER DEFAULT 0,
+        watched INTEGER NOT NULL DEFAULT 0,
+        progress INTEGER NOT NULL DEFAULT 0,
+        progress_video_id INTEGER,
+        available INTEGER NOT NULL DEFAULT 1,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        FOREIGN KEY (instructor_id) REFERENCES instructors(id) ON DELETE SET NULL,
+        FOREIGN KEY (position_id) REFERENCES positions(id) ON DELETE SET NULL,
+        FOREIGN KEY (technique_category_id) REFERENCES technique_categories(id) ON DELETE SET NULL
+      );
+      INSERT INTO instructionals_new (
+        id, title, description, instructor_id, position_id, technique_category_id,
+        ruleset, folder_path, duration, thumbnail, notes, rating, watched, progress,
+        progress_video_id, available, created_at, updated_at
+      )
+      SELECT
+        id, title, description, instructor_id, position_id, technique_category_id,
+        ruleset, folder_path, duration, thumbnail, notes, rating, watched, progress,
+        progress_video_id, available, created_at, updated_at
+      FROM instructionals;
+      DROP TABLE instructionals;
+      ALTER TABLE instructionals_new RENAME TO instructionals;
+    `);
+  });
+  rebuild();
+  if (wasForeignKeysOn) sqlite.pragma("foreign_keys = ON");
 }
 
 function migrate() {
@@ -330,6 +383,9 @@ function migrate() {
       if (folder) setFolder.run(folder, row.id);
     }
   }
+  // Must run last: rebuilds the instructionals table, and depends on the
+  // folder_path/progress_video_id/ruleset columns and legacy migration above.
+  fixInstructorCascade();
 }
 
 initDb();
@@ -701,11 +757,16 @@ export const storage = {
     db.delete(instructionalTechniqueCategories)
       .where(eq(instructionalTechniqueCategories.instructionalId, id))
       .run();
-    if (categoryIds.length) {
-      db.insert(instructionalTechniqueCategories)
-        .values(categoryIds.map((c) => ({ instructionalId: id, techniqueCategoryId: c })))
-        .run();
-    }
+    if (!categoryIds.length) return;
+    const exists = db
+      .select({ id: instructionals.id })
+      .from(instructionals)
+      .where(eq(instructionals.id, id))
+      .get();
+    if (!exists) return;
+    db.insert(instructionalTechniqueCategories)
+      .values(categoryIds.map((c) => ({ instructionalId: id, techniqueCategoryId: c })))
+      .run();
   },
 
   updateProgress(
