@@ -40,6 +40,8 @@ import {
   ListVideo,
   Play,
   Shirt,
+  RectangleHorizontal,
+  Square,
 } from "lucide-react";
 import { formatDuration, formatBytes, formatRelative } from "@/lib/format";
 import type { InstructionalVideo } from "@shared/schema";
@@ -58,6 +60,11 @@ const RULESET_DISPLAY: Record<string, { label: string; cls: string }> = {
 };
 
 const PLAYBACK_RATES = [0.5, 0.75, 1, 1.25, 1.5, 2];
+const THEATRE_STORAGE_KEY = "jits:theatre-mode";
+
+function readTheatrePref(): boolean {
+  try { return localStorage.getItem(THEATRE_STORAGE_KEY) === "1"; } catch { return false; }
+}
 
 export default function InstructionalDetail() {
   const { id } = useParams();
@@ -69,6 +76,26 @@ export default function InstructionalDetail() {
   const [currentVideoId, setCurrentVideoId] = useState<number | null>(null);
   const [autoAdvance, setAutoAdvance] = useState(false);
   const [playbackRate, setPlaybackRate] = useState(1);
+  const [theatre, setTheatre] = useState(readTheatrePref);
+
+  useEffect(() => {
+    try { localStorage.setItem(THEATRE_STORAGE_KEY, theatre ? "1" : "0"); } catch { /* storage unavailable */ }
+  }, [theatre]);
+
+  // "t" toggles theatre mode, like YouTube. Ignore while typing or with modifiers.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "t" && e.key !== "T") return;
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      const el = e.target as HTMLElement | null;
+      if (el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName))) return;
+      if (document.querySelector('[role="dialog"]')) return;
+      e.preventDefault();
+      setTheatre((t) => !t);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   const item = useQuery({
     queryKey: ["/api/instructionals", numId],
@@ -194,13 +221,16 @@ export default function InstructionalDetail() {
   const progressPct = totalDuration && totalDuration > 0 ? Math.min(100, Math.round((aggregateProgress / totalDuration) * 100)) : 0;
 
   return (
-    <div className="p-4 md:p-6 max-w-6xl mx-auto">
-      <Link href="/" className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground mb-4">
-        <ArrowLeft className="size-4" /> Back to library
-      </Link>
+    <div>
+      <div className="px-4 md:px-6 pt-4 md:pt-6 max-w-6xl mx-auto">
+        <Link href="/" className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground mb-4">
+          <ArrowLeft className="size-4" /> Back to library
+        </Link>
+      </div>
 
-      {/* Player */}
-      <div className="rounded-lg overflow-hidden border border-card-border bg-black mb-3 w-full">
+      {/* Player — same tree position in both modes so the <video> never remounts */}
+      <div className={theatre ? "w-full bg-black" : "px-4 md:px-6 max-w-6xl mx-auto"}>
+      <div className={theatre ? "w-full" : "rounded-lg overflow-hidden border border-card-border bg-black w-full"}>
         {currentVideo ? (
           <video
             ref={videoRef}
@@ -208,7 +238,7 @@ export default function InstructionalDetail() {
             src={apiUrl(`/api/videos/${currentVideo.id}/stream`)}
             controls
             autoPlay={autoAdvance}
-            className="w-full aspect-video max-h-[75vh] object-contain bg-black"
+            className={`w-full aspect-video object-contain bg-black ${theatre ? "max-h-[calc(100vh-8rem)]" : "max-h-[75vh]"}`}
             onTimeUpdate={onTimeUpdate}
             onLoadedMetadata={onLoadedMetadata}
             onEnded={onEnded}
@@ -221,9 +251,11 @@ export default function InstructionalDetail() {
           </div>
         )}
       </div>
+      </div>
 
-      {/* Playback Speed */}
-      <div className="flex items-center gap-2 mb-6">
+      <div className="px-4 md:px-6 pb-4 md:pb-6 pt-3 max-w-6xl mx-auto">
+      {/* Playback Speed + theatre toggle */}
+      <div className="flex items-center gap-2 mb-6 flex-wrap">
         <span className="text-xs text-muted-foreground">Speed</span>
         {PLAYBACK_RATES.map((rate) => (
           <button
@@ -238,6 +270,22 @@ export default function InstructionalDetail() {
             {rate}×
           </button>
         ))}
+        <div className="flex-1" />
+        <button
+          onClick={() => setTheatre((t) => !t)}
+          title={theatre ? "Default view (t)" : "Theatre mode (t)"}
+          aria-label={theatre ? "Exit theatre mode" : "Theatre mode"}
+          aria-pressed={theatre}
+          data-testid="button-theatre"
+          className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium border transition-colors ${
+            theatre
+              ? "bg-primary text-primary-foreground border-primary"
+              : "border-border bg-muted hover:bg-muted/70 text-muted-foreground"
+          }`}
+        >
+          {theatre ? <Square className="size-3.5" /> : <RectangleHorizontal className="size-3.5" />}
+          {theatre ? "Default view" : "Theatre"}
+        </button>
       </div>
 
       {/* Header */}
@@ -365,6 +413,8 @@ export default function InstructionalDetail() {
           <MetaRow icon={Calendar} label="Added" value={formatRelative(it.createdAt)} />
           {it.folderPath && <MetaRow icon={Folder} label="Folder" value={it.folderPath} mono />}
         </div>
+      </div>
+
       </div>
 
       <EditDialog open={editOpen} onOpenChange={setEditOpen} instructional={it} />
