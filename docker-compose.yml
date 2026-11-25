@@ -1,12 +1,22 @@
 # Jits Library — self-hosted BJJ instructional organizer
 # -------------------------------------------------------
 # 1. Edit the media volume path below to point at your instructionals folder.
-# 2. `docker compose up -d --build`
+# 2. `docker compose up -d`
 # 3. Open http://localhost:5000 → Scan library → Generate thumbnails.
+#
+# Auto-update: every push to master builds a new image on GitHub Actions and
+# publishes it to ghcr.io/timothfee/jits:latest. The watchtower service below
+# checks for it every 5 minutes and restarts jits-library on the new image.
+# Your library data lives in the jits-data volume and is kept across updates.
 services:
   jits-library:
-    build: .
-    image: jits-library:latest
+    image: ghcr.io/timothfee/jits:latest
+    # To build locally from source instead, comment out `image:` above,
+    # uncomment `build: .`, and run `docker compose up -d --build`.
+    # build: .
+    labels:
+      # Only containers with this label are updated by watchtower.
+      - com.centurylinklabs.watchtower.enable=true
     container_name: jits-library
     restart: unless-stopped
     ports:
@@ -36,6 +46,18 @@ services:
       # Optional: also generate thumbnails for remote http(s) video URLs
       # - ALLOW_REMOTE_THUMBNAILS=true
       # Optional: override the timezone for timestamps
+      - TZ=America/Chicago
+
+  watchtower:
+    image: nickfedor/watchtower:latest
+    container_name: jits-watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - WATCHTOWER_LABEL_ENABLE=true   # only touch labelled containers
+      - WATCHTOWER_POLL_INTERVAL=300   # seconds between checks
+      - WATCHTOWER_CLEANUP=true        # delete old images after updating
       - TZ=America/Chicago
 
 volumes:

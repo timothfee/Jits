@@ -23,13 +23,19 @@ Built with Express + React + Vite + Tailwind + Drizzle ORM (SQLite). Ships as a 
      - jits-data:/data
    ```
 
-2. Build and run:
+2. Pull and run:
 
    ```bash
-   docker compose up -d --build
+   docker compose up -d
    ```
 
 3. Open `http://localhost:5000` and click **Scan library** in the sidebar.
+
+### Automatic updates
+
+Every push to `master` triggers a GitHub Actions workflow (`.github/workflows/docker-publish.yml`) that builds the image and publishes it to `ghcr.io/timothfee/jits:latest`. The `watchtower` service in `docker-compose.yml` checks for a new image every 5 minutes and restarts `jits-library` on it. The `jits-data` volume is kept, so your library survives updates.
+
+One-time setup: after the first workflow run, open the package on GitHub (profile → **Packages** → `jits` → **Package settings**) and set visibility to **Public** so the NAS can pull without logging in.
 
 Your database lives in the `jits-data` volume, so metadata survives container updates.
 
